@@ -284,7 +284,7 @@ impl App {
             .split(area);
 
         // Title
-        let title = Paragraph::new(" 📜 Task History ")
+        let title = Paragraph::new("Task History ")
             .style(Style::default().fg(Color::Magenta).bold())
             .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
         title.render(chunks[0], buf);
