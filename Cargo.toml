@@ -1,8 +1,17 @@
 [package]
-name = "ratatui-counter-app"
+name = "timetracker"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-crossterm = "0.29.0"
-ratatui = "0.29.0"
+# Time tracking
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Optional: For better error handling
+color-eyre = "0.6"
