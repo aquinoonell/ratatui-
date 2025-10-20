@@ -1,13 +1,7 @@
 use chrono::{DateTime, Duration, Local};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    DefaultTerminal, Frame,
-    buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    symbols::border,
-    text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, ListState, Paragraph, Widget, Wrap},
+    buffer::Buffer, layout::{Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, symbols::border, text::{Line, Span, Text}, widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap}, DefaultTerminal, Frame
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -332,10 +326,11 @@ impl App {
                 )
                 .highlight_style(
                     Style::default()
-                        .bg(Color::DarkGray)
+                        .bg(Color::Magenta)
                         .add_modifier(Modifier::BOLD)
                 )
-                .highlight_symbol("▶ ");
+                .highlight_symbol("> ")
+                .highlight_spacing(HighlightSpacing::Always);
 
             ratatui::widgets::StatefulWidget::render(list, chunks[1], buf, &mut self.list_state);
         }
