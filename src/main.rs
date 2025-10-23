@@ -1,7 +1,13 @@
 use chrono::{DateTime, Duration, Local};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    buffer::Buffer, layout::{Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, symbols::border, text::{Line, Span, Text}, widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap}, DefaultTerminal, Frame
+    buffer::Buffer,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    symbols::border,
+    text::{Line, Span, Text},
+    widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap},
+    DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -79,7 +85,11 @@ impl TimeTracker {
 
     fn start(&mut self, name: &str) -> Result<(), String> {
         if self.current_entry.is_some() {
-            return Err("Active session already running".to_string());
+            self.current_entry = Some(TimeEntry {
+                activity: name.to_string(),
+                start: Local::now(),
+                end: None,
+            });
         }
 
         self.current_entry = Some(TimeEntry {
@@ -127,7 +137,7 @@ impl App {
     fn new() -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        
+
         App {
             tracker: TimeTracker::load(),
             exit: false,
@@ -150,7 +160,7 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        
+
         match self.view {
             View::Main => self.render_main_view(area, frame.buffer_mut()),
             View::History => self.render_history_view(area, frame.buffer_mut()),
@@ -203,7 +213,10 @@ impl App {
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("○ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("No active task", Style::default().fg(Color::DarkGray).italic()),
+                    Span::styled(
+                        "No active task",
+                        Style::default().fg(Color::DarkGray).italic(),
+                    ),
                 ]),
             ]),
         };
@@ -212,7 +225,7 @@ impl App {
             .block(
                 Block::bordered()
                     .title(" Current Status ")
-                    .border_style(Style::default().fg(Color::White))
+                    .border_style(Style::default().fg(Color::White)),
             )
             .wrap(Wrap { trim: false });
         status_block.render(chunks[1], buf);
@@ -228,18 +241,16 @@ impl App {
         // Controls
         let controls = match self.mode {
             InputMode::Normal => {
-                vec![
-                    Line::from(vec![
-                        Span::styled("S", Style::default().fg(Color::Green).bold()),
-                        Span::raw(" Start Task  "),
-                        Span::styled("X", Style::default().fg(Color::Red).bold()),
-                        Span::raw(" Stop  "),
-                        Span::styled("H", Style::default().fg(Color::Yellow).bold()),
-                        Span::raw(" History  "),
-                        Span::styled("Q", Style::default().fg(Color::Gray).bold()),
-                        Span::raw(" Quit"),
-                    ])
-                ]
+                vec![Line::from(vec![
+                    Span::styled("S", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" Start Task  "),
+                    Span::styled("X", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop  "),
+                    Span::styled("H", Style::default().fg(Color::Yellow).bold()),
+                    Span::raw(" History  "),
+                    Span::styled("Q", Style::default().fg(Color::Gray).bold()),
+                    Span::raw(" Quit"),
+                ])]
             }
             InputMode::StartTask => {
                 vec![
@@ -259,10 +270,7 @@ impl App {
         };
 
         let controls_block = Paragraph::new(controls)
-            .block(
-                Block::bordered()
-                    .border_style(Style::default().fg(Color::Gray))
-            )
+            .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
             .centered();
         controls_block.render(chunks[3], buf);
     }
@@ -300,7 +308,7 @@ impl App {
                 .map(|(i, entry)| {
                     let duration = entry.format_duration();
                     let date = entry.start.format("%Y-%m-%d %H:%M").to_string();
-                    
+
                     let content = Line::from(vec![
                         Span::styled(
                             format!("{}. ", self.tracker.entries.len() - i),
@@ -310,24 +318,21 @@ impl App {
                         Span::raw(" - "),
                         Span::styled(duration, Style::default().fg(Color::Cyan)),
                         Span::raw(" "),
-                        Span::styled(
-                            format!("({})", date),
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(format!("({})", date), Style::default().fg(Color::DarkGray)),
                     ]);
                     ListItem::new(content)
                 })
                 .collect();
 
             let list = List::new(items)
-                .block(
-                    Block::bordered()
-                        .title(format!(" Completed Tasks ({}) ", self.tracker.entries.len()))
-                )
+                .block(Block::bordered().title(format!(
+                    " Completed Tasks ({}) ",
+                    self.tracker.entries.len()
+                )))
                 .highlight_style(
                     Style::default()
                         .bg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::BOLD),
                 )
                 .highlight_symbol("> ")
                 .highlight_spacing(HighlightSpacing::Always);
@@ -336,14 +341,12 @@ impl App {
         }
 
         // Controls
-        let controls = Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("↑↓", Style::default().fg(Color::Yellow).bold()),
-                Span::raw(" Navigate  "),
-                Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                Span::raw(" Back to Main"),
-            ])
-        ])
+        let controls = Paragraph::new(vec![Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(Color::Yellow).bold()),
+            Span::raw(" Navigate  "),
+            Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+            Span::raw(" Back to Main"),
+        ])])
         .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
         .centered();
         controls.render(chunks[2], buf);
@@ -374,19 +377,17 @@ impl App {
                     self.input.clear();
                     self.message = None;
                 }
-                KeyCode::Char('x') | KeyCode::Char('X') => {
-                    match self.tracker.stop() {
-                        Ok(_) => {
-                            self.message = Some("✓ Task stopped successfully".to_string());
-                            self.message_color = Color::Green;
-                            let _ = self.tracker.save();
-                        }
-                        Err(e) => {
-                            self.message = Some(format!("✗ Error: {}", e));
-                            self.message_color = Color::Red;
-                        }
+                KeyCode::Char('x') | KeyCode::Char('X') => match self.tracker.stop() {
+                    Ok(_) => {
+                        self.message = Some("✓ Task stopped successfully".to_string());
+                        self.message_color = Color::Green;
+                        let _ = self.tracker.save();
                     }
-                }
+                    Err(e) => {
+                        self.message = Some(format!("✗ Error: {}", e));
+                        self.message_color = Color::Red;
+                    }
+                },
                 KeyCode::Char('h') | KeyCode::Char('H') => {
                     self.view = View::History;
                     self.message = None;
