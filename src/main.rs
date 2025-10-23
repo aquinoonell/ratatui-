@@ -111,7 +111,7 @@ impl TimeTracker {
 
     fn stop_all(&mut self) -> usize {
         let count = self.active_entries.len();
-        let now = Local.now();
+        let now = Local::now();
 
         for mut entry in self.active_entries.drain(..) {
             entry.end = Some(now);
@@ -296,8 +296,8 @@ impl App {
                 vec![
                     Line::from(vec![
                         Span::raw("Task numer to stop: "),
-                        Span::styled(&self.input, Style::default().fg(color::Yellow)),
-                        Span::styled("█", Style::default().fg(color::Yellow)),
+                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                        Span::styled("█", Style::default().fg(Color::Yellow)),
                     ]),
                     Line::from(vec![
                         Span::styled("Enter", Style::default().fg(Color::Green).bold()),
@@ -418,17 +418,45 @@ impl App {
                     self.input.clear();
                     self.message = None;
                 }
-                KeyCode::Char('x') | KeyCode::Char('X') => match self.tracker.stop() {
-                    Ok(_) => {
-                        self.message = Some("✓ Task stopped successfully".to_string());
+                KeyCode::Char('x') | KeyCode::Char('X') => {
+                    if self.tracker.active_entries.is_empty() {
+                        self.message = Some("✗ No active tasks to stop".to_string());
+                        self.message_color = Color::Red;
+                    } else if self.tracker.active_entries.len() == 1 {
+                        // Auto-stop if only one task
+                        match self.tracker.stop(0) {
+                            Ok(name) => {
+                                self.message = Some(format!("✓ Stopped task: {}", name));
+                                self.message_color = Color::Green;
+                                let _ = self.tracker.save();
+                            }
+                            Err(e) => {
+                                self.message = Some(format!("✗ Error: {}", e));
+                                self.message_color = Color::Red;
+                            }
+                        }
+                    } else {
+                        // Multiple tasks - ask which to stop
+                        self.mode = InputMode::StopTask;
+                        self.input.clear();
+                        self.message = None;
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    let count = self.tracker.stop_all();
+                    if count > 0 {
+                        self.message = Some(format!(
+                            "✓ Stopped {} task{}",
+                            count,
+                            if count == 1 { "" } else { "s" }
+                        ));
                         self.message_color = Color::Green;
                         let _ = self.tracker.save();
-                    }
-                    Err(e) => {
-                        self.message = Some(format!("✗ Error: {}", e));
+                    } else {
+                        self.message = Some("✗ No active tasks to stop".to_string());
                         self.message_color = Color::Red;
                     }
-                },
+                }
                 KeyCode::Char('h') | KeyCode::Char('H') => {
                     self.view = View::History;
                     self.message = None;
@@ -459,8 +487,7 @@ impl App {
             },
         }
     }
-
-    fn handle_input_mode(&mut self, key_event: KeyEvent) {
+    fn handle_start_task_mode(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Enter => {
                 if !self.input.is_empty() {
@@ -480,6 +507,54 @@ impl App {
                 self.input.clear();
             }
             KeyCode::Char(c) => {
+                self.input.push(c);
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.input.clear();
+                self.message = Some("Cancelled".to_string());
+                self.message_color = Color::Yellow;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_stop_task_mode(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Enter => {
+                if !self.input.is_empty() {
+                    if let Ok(num) = self.input.parse::<usize>() {
+                        if num > 0 && num <= self.tracker.active_entries.len() {
+                            match self.tracker.stop(num - 1) {
+                                Ok(name) => {
+                                    self.message = Some(format!("✓ Stopped task: {}", name));
+                                    self.message_color = Color::Green;
+                                    let _ = self.tracker.save();
+                                }
+                                Err(e) => {
+                                    self.message = Some(format!("✗ Error: {}", e));
+                                    self.message_color = Color::Red;
+                                }
+                            }
+                        } else {
+                            self.message = Some(format!(
+                                "✗ Invalid task number (1-{})",
+                                self.tracker.active_entries.len()
+                            ));
+                            self.message_color = Color::Red;
+                        }
+                    } else {
+                        self.message = Some("✗ Please enter a valid number".to_string());
+                        self.message_color = Color::Red;
+                    }
+                }
+                self.mode = InputMode::Normal;
+                self.input.clear();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
                 self.input.push(c);
             }
             KeyCode::Backspace => {
