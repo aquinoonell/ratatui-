@@ -10,7 +10,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::{fmt::format, fs};
 use std::io;
 use std::path::PathBuf;
 
@@ -48,14 +48,15 @@ impl TimeEntry {
 #[derive(Serialize, Deserialize)]
 struct TimeTracker {
     entries: Vec<TimeEntry>,
-    current_entry: Option<TimeEntry>,
+    // Changed the previous Option<TimeEntry for Vec<TimeEntry> in order to get multiple tasks.
+    current_entry: Vec<TimeEntry>,
 }
 
 impl TimeTracker {
     fn new() -> Self {
         TimeTracker {
             entries: Vec::new(),
-            current_entry: None,
+            active_entries:Vec::new(),
         }
     }
 
@@ -84,15 +85,11 @@ impl TimeTracker {
     }
 
     fn start(&mut self, name: &str) -> Result<(), String> {
-        if self.current_entry.is_some() {
-            self.current_entry = Some(TimeEntry {
-                activity: name.to_string(),
-                start: Local::now(),
-                end: None,
-            });
-        }
+        if self.active_entries.iter().any(|e| e.activity == name) {
+            return Err(format!("Task '{}' is already active", name));
+       }
 
-        self.current_entry = Some(TimeEntry {
+        self.active_entries.push(TimeEntry {
             activity: name.to_string(),
             start: Local::now(),
             end: None,
@@ -100,15 +97,16 @@ impl TimeTracker {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), String> {
-        let mut entry = self
-            .current_entry
-            .take()
-            .ok_or("No active session".to_string())?;
+    fn stop(&mut self, index: usize) -> Result<String, String> {
+        if index >= self.active_entries.len(){
+            return Err("Invalid task index".to_string());
+        }
 
+        let mut entry = self.active_entries.remove(index);
         entry.end = Some(Local::now());
+        let name = entry.activity.clone();
         self.entries.push(entry);
-        Ok(())
+        Ok(name)
     }
 }
 
