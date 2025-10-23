@@ -267,11 +267,13 @@ impl App {
                     Span::styled("S", Style::default().fg(Color::Green).bold()),
                     Span::raw(" Start Task  "),
                     Span::styled("X", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop  "),
+                    Span::raw(" Stop Task "),
+                    Span::styled("A", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop All "),
                     Span::styled("H", Style::default().fg(Color::Yellow).bold()),
                     Span::raw(" History  "),
                     Span::styled("Q", Style::default().fg(Color::Gray).bold()),
-                    Span::raw(" Quit"),
+                    Span::raw(" Quit "),
                 ])]
             }
             InputMode::StartTask => {
@@ -284,6 +286,22 @@ impl App {
                     Line::from(vec![
                         Span::styled("Enter", Style::default().fg(Color::Green).bold()),
                         Span::raw(" to confirm  "),
+                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                        Span::raw(" to cancel"),
+                    ]),
+                ]
+            }
+
+            InputMode::StopTask => {
+                vec![
+                    Line::from(vec![
+                        Span::raw("Task numer to stop: "),
+                        Span::styled(&self.input, Style::default().fg(color::Yellow)),
+                        Span::styled("█", Style::default().fg(color::Yellow)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                        Span::raw(" to confirm "),
                         Span::styled("Esc", Style::default().fg(Color::Red).bold()),
                         Span::raw(" to cancel"),
                     ]),
@@ -386,7 +404,8 @@ impl App {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match self.mode {
             InputMode::Normal => self.handle_normal_mode(key_event),
-            InputMode::StartTask => self.handle_input_mode(key_event),
+            InputMode::StartTask => self.handle_start_task_mode(key_event),
+            InputMode::StopTask => self.handle_stop_task_mode(key_event),
         }
     }
 
