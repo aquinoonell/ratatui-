@@ -10,9 +10,9 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
-use std::{fmt::format, fs};
 use std::io;
 use std::path::PathBuf;
+use std::{fmt::format, fs};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -49,14 +49,14 @@ impl TimeEntry {
 struct TimeTracker {
     entries: Vec<TimeEntry>,
     // Changed the previous Option<TimeEntry for Vec<TimeEntry> in order to get multiple tasks.
-    current_entry: Vec<TimeEntry>,
+    active_entries: Vec<TimeEntry>,
 }
 
 impl TimeTracker {
     fn new() -> Self {
         TimeTracker {
             entries: Vec::new(),
-            active_entries:Vec::new(),
+            active_entries: Vec::new(),
         }
     }
 
@@ -87,7 +87,7 @@ impl TimeTracker {
     fn start(&mut self, name: &str) -> Result<(), String> {
         if self.active_entries.iter().any(|e| e.activity == name) {
             return Err(format!("Task '{}' is already active", name));
-       }
+        }
 
         self.active_entries.push(TimeEntry {
             activity: name.to_string(),
@@ -98,7 +98,7 @@ impl TimeTracker {
     }
 
     fn stop(&mut self, index: usize) -> Result<String, String> {
-        if index >= self.active_entries.len(){
+        if index >= self.active_entries.len() {
             return Err("Invalid task index".to_string());
         }
 
@@ -108,11 +108,24 @@ impl TimeTracker {
         self.entries.push(entry);
         Ok(name)
     }
+
+    fn stop_all(&mut self) -> usize {
+        let count = self.active_entries.len();
+        let now = Local.now();
+
+        for mut entry in self.active_entries.drain(..) {
+            entry.end = Some(now);
+            self.entries.push(entry);
+        }
+
+        count
+    }
 }
 
 enum InputMode {
     Normal,
     StartTask,
+    StopTask,
 }
 
 enum View {
@@ -129,12 +142,16 @@ struct App {
     message: Option<String>,
     message_color: Color,
     list_state: ListState,
+    active_list_state: ListState,
 }
 
 impl App {
     fn new() -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+
+        let mut active_list_state = ListState::default();
+        active_list_state.select(Some(0));
 
         App {
             tracker: TimeTracker::load(),
@@ -145,6 +162,7 @@ impl App {
             message: None,
             message_color: Color::Green,
             list_state,
+            active_list_state,
         }
     }
 
@@ -183,42 +201,48 @@ impl App {
         title.render(chunks[0], buf);
 
         // Status section
-        let status_text = match &self.tracker.current_entry {
-            Some(entry) => {
-                let duration = entry.format_duration();
-                Text::from(vec![
-                    Line::from(vec![
-                        Span::styled("● ", Style::default().fg(Color::Green).bold()),
-                        Span::styled("Active Task: ", Style::default().fg(Color::Yellow)),
-                        Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
-                    ]),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw("Started: "),
-                        Span::styled(
-                            entry.start.format("%Y-%m-%d %H:%M:%S").to_string(),
-                            Style::default().fg(Color::Gray),
-                        ),
-                    ]),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw("Duration: "),
-                        Span::styled(duration, Style::default().fg(Color::Cyan).bold()),
-                    ]),
-                ])
-            }
-            None => Text::from(vec![
+        // Status section - show all active tasks
+        let status_text = if self.tracker.active_entries.is_empty() {
+            Text::from(vec![
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("○ ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
-                        "No active task",
+                        "No active tasks",
                         Style::default().fg(Color::DarkGray).italic(),
                     ),
                 ]),
-            ]),
-        };
+            ])
+        } else {
+            let mut lines = vec![
+                Line::from(vec![Span::styled(
+                    format!(
+                        "{} Active Task{}",
+                        self.tracker.active_entries.len(),
+                        if self.tracker.active_entries.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ),
+                    Style::default().fg(Color::Yellow).bold(),
+                )]),
+                Line::from(""),
+            ];
 
+            for (i, entry) in self.tracker.active_entries.iter().enumerate() {
+                let duration = entry.format_duration();
+                lines.push(Line::from(vec![
+                    Span::styled("● ", Style::default().fg(Color::Green).bold()),
+                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
+                    Span::raw(" - "),
+                    Span::styled(duration, Style::default().fg(Color::Cyan).bold()),
+                ]));
+            }
+
+            Text::from(lines)
+        };
         let status_block = Paragraph::new(status_text)
             .block(
                 Block::bordered()
