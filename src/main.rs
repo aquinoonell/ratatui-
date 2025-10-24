@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Local};
+use color_eyre::eyre::Ok;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
@@ -121,12 +122,21 @@ impl TimeTracker {
 
         count
     }
+
+    fn delete_task(&mut self, index: usize) -> Result<String, String>{
+        if index >= self.active_entries.len(){
+            return Err("Invalid task index".to_string());
+        }
+        todo!()
+    }
+
 }
 
 enum InputMode {
     Normal,
     StartTask,
     StopTask,
+    DeleteTask,
 }
 
 enum View {
@@ -364,9 +374,7 @@ impl App {
                     ListItem::new(content)
                 })
                 .collect();
-            // Delte entry for Task history.
-            InputMode
-                todo!()
+            
 
             let list = List::new(items)
                 .block(Block::bordered().title(format!(
@@ -396,6 +404,18 @@ impl App {
         .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
         .centered();
         controls.render(chunks[2], buf);
+        
+        // Delte entry for Task history.
+        InputMode::DeleteTask => {
+            vec![
+                Line::from(vec![
+                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" to confirm "),
+                    Span::styled("Esc", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" to cancel"),
+                ]),
+            ]
+        }
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -414,6 +434,7 @@ impl App {
             InputMode::Normal => self.handle_normal_mode(key_event),
             InputMode::StartTask => self.handle_start_task_mode(key_event),
             InputMode::StopTask => self.handle_stop_task_mode(key_event),
+            InputMode::DeleteTask => self.handle_key_event(key_event),
         }
     }
 
@@ -474,6 +495,28 @@ impl App {
             View::History => match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.view = View::Main;
+                }
+                // KeyCode to delete task on history
+                KeyCode::Char('x') | KeyCode::Char('X') =>{
+                    if self.tracker.active_entries.is_empty() {
+                        self.message = Some("x No taks to delete".to_string());
+                        self.message_color = Color::Red;
+                    }else if self.tracker.active_entries.len() == 1 {
+                        //Auto-stop if only one task
+                        match self.tracker.stop(0) {
+                            Ok(name) => {
+                                self.message = Some(format!("✓ Deleted task: {}", name));
+                                self.message_color = Color::Green;
+                                let _ = self.tracker.save();
+                            }
+                           Err(e) => {
+                                self.message = Some(format!("✗ Error: {}", e));
+                                self.message_color = Color::Red;
+                            }
+                            
+                        }
+                        
+                    }
                 }
                 KeyCode::Up => {
                     if !self.tracker.entries.is_empty() {
