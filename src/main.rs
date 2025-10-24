@@ -12,6 +12,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration as StdDuration;
 use std::{fmt::format, fs};
 
 fn main() -> io::Result<()> {
@@ -393,9 +394,11 @@ impl App {
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
-        if let Event::Key(key_event) = event::read()? {
-            if key_event.kind == KeyEventKind::Press {
-                self.handle_key_event(key_event);
+        if event::poll(StdDuration::from_millis(100))? {
+            if let Event::Key(key_event) = event::read()? {
+                if key_event.kind == KeyEventKind::Press {
+                    self.handle_key_event(key_event);
+                }
             }
         }
         Ok(())
