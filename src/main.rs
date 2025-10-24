@@ -348,7 +348,7 @@ impl App {
                 .enumerate()
                 .map(|(i, entry)| {
                     let duration = entry.format_duration();
-                    let date = entry.start.format("%Y-%m-%d %H:%M").to_string();
+                    let date = entry.start.format("%m-%d-%Y %H:%M").to_string();
 
                     let content = Line::from(vec![
                         Span::styled(
@@ -364,6 +364,9 @@ impl App {
                     ListItem::new(content)
                 })
                 .collect();
+            // Delte entry for Task history.
+            InputMode
+                todo!()
 
             let list = List::new(items)
                 .block(Block::bordered().title(format!(
@@ -386,7 +389,9 @@ impl App {
             Span::styled("↑↓", Style::default().fg(Color::Yellow).bold()),
             Span::raw(" Navigate  "),
             Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-            Span::raw(" Back to Main"),
+            Span::raw(" Back to Main "),
+            Span::styled("X", Style::default().fg(Color::Red).bold()),
+            Span::raw(" Delete entry "),
         ])])
         .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
         .centered();
