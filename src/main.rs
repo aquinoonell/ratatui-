@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Local};
-use color_eyre::eyre::Ok;
+use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
@@ -123,13 +123,13 @@ impl TimeTracker {
         count
     }
 
-    fn delete_task(&mut self, index: usize) -> Result<String, String>{
-        if index >= self.active_entries.len(){
+    fn delete_task(&mut self, index: usize) -> Result<String, String> {
+        if index >= self.entries.len() {
             return Err("Invalid task index".to_string());
         }
-        todo!()
+        let entry = self.entries.remove(index);
+        Ok(entry.activity)
     }
-
 }
 
 enum InputMode {
@@ -272,6 +272,7 @@ impl App {
         }
 
         // Controls
+        // Controls
         let controls = match self.mode {
             InputMode::Normal => {
                 vec![Line::from(vec![
@@ -302,11 +303,10 @@ impl App {
                     ]),
                 ]
             }
-
             InputMode::StopTask => {
                 vec![
                     Line::from(vec![
-                        Span::raw("Task numer to stop: "),
+                        Span::raw("Task number to stop: "),
                         Span::styled(&self.input, Style::default().fg(Color::Yellow)),
                         Span::styled("█", Style::default().fg(Color::Yellow)),
                     ]),
@@ -318,8 +318,22 @@ impl App {
                     ]),
                 ]
             }
+            InputMode::DeleteTask => {
+                // DeleteTask UI is only shown in History view, so show normal controls here
+                vec![Line::from(vec![
+                    Span::styled("S", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" Start Task  "),
+                    Span::styled("X", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop Task "),
+                    Span::styled("A", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop All "),
+                    Span::styled("H", Style::default().fg(Color::Yellow).bold()),
+                    Span::raw(" History  "),
+                    Span::styled("Q", Style::default().fg(Color::Gray).bold()),
+                    Span::raw(" Quit "),
+                ])]
+            }
         };
-
         let controls_block = Paragraph::new(controls)
             .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
             .centered();
@@ -374,7 +388,6 @@ impl App {
                     ListItem::new(content)
                 })
                 .collect();
-            
 
             let list = List::new(items)
                 .block(Block::bordered().title(format!(
@@ -391,31 +404,34 @@ impl App {
 
             ratatui::widgets::StatefulWidget::render(list, chunks[1], buf, &mut self.list_state);
         }
-
-        // Controls
-        let controls = Paragraph::new(vec![Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(Color::Yellow).bold()),
-            Span::raw(" Navigate  "),
-            Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-            Span::raw(" Back to Main "),
-            Span::styled("X", Style::default().fg(Color::Red).bold()),
-            Span::raw(" Delete entry "),
-        ])])
-        .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
-        .centered();
-        controls.render(chunks[2], buf);
-        
-        // Delte entry for Task history.
-        InputMode::DeleteTask => {
-            vec![
+        // Controls for Task History
+        let controls = match self.mode {
+            InputMode::DeleteTask => Paragraph::new(vec![
+                Line::from(vec![
+                    Span::raw("Task number to delete: "),
+                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
                 Line::from(vec![
                     Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                    Span::raw(" to confirm "),
-                    Span::styled("Esc", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" to confirm  "),
+                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
                     Span::raw(" to cancel"),
                 ]),
-            ]
+            ]),
+            _ => Paragraph::new(vec![Line::from(vec![
+                Span::styled("↑↓", Style::default().fg(Color::Yellow).bold()),
+                Span::raw(" Navigate  "),
+                Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Back to Main  "),
+                Span::styled("X", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Delete entry "),
+            ])]),
         }
+        .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
+        .centered();
+
+        controls.render(chunks[2], buf);
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -434,7 +450,7 @@ impl App {
             InputMode::Normal => self.handle_normal_mode(key_event),
             InputMode::StartTask => self.handle_start_task_mode(key_event),
             InputMode::StopTask => self.handle_stop_task_mode(key_event),
-            InputMode::DeleteTask => self.handle_key_event(key_event),
+            InputMode::DeleteTask => self.handle_delete_task_mode(key_event),
         }
     }
 
@@ -496,28 +512,19 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.view = View::Main;
                 }
+
                 // KeyCode to delete task on history
-                KeyCode::Char('x') | KeyCode::Char('X') =>{
-                    if self.tracker.active_entries.is_empty() {
-                        self.message = Some("x No taks to delete".to_string());
+                KeyCode::Char('x') | KeyCode::Char('X') => {
+                    if self.tracker.entries.is_empty() {
+                        self.message = Some("✗ No task to delete".to_string());
                         self.message_color = Color::Red;
-                    }else if self.tracker.active_entries.len() == 1 {
-                        //Auto-stop if only one task
-                        match self.tracker.stop(0) {
-                            Ok(name) => {
-                                self.message = Some(format!("✓ Deleted task: {}", name));
-                                self.message_color = Color::Green;
-                                let _ = self.tracker.save();
-                            }
-                           Err(e) => {
-                                self.message = Some(format!("✗ Error: {}", e));
-                                self.message_color = Color::Red;
-                            }
-                            
-                        }
-                        
+                    } else {
+                        self.mode = InputMode::DeleteTask;
+                        self.input.clear();
+                        self.message = None;
                     }
                 }
+
                 KeyCode::Up => {
                     if !self.tracker.entries.is_empty() {
                         let i = self.list_state.selected().unwrap_or(0);
@@ -594,6 +601,55 @@ impl App {
                             self.message = Some(format!(
                                 "✗ Invalid task number (1-{})",
                                 self.tracker.active_entries.len()
+                            ));
+                            self.message_color = Color::Red;
+                        }
+                    } else {
+                        self.message = Some("✗ Please enter a valid number".to_string());
+                        self.message_color = Color::Red;
+                    }
+                }
+                self.mode = InputMode::Normal;
+                self.input.clear();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                self.input.push(c);
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.input.clear();
+                self.message = Some("Cancelled".to_string());
+                self.message_color = Color::Yellow;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_delete_task_mode(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Enter => {
+                if !self.input.is_empty() {
+                    if let Ok(num) = self.input.parse::<usize>() {
+                        if num > 0 && num <= self.tracker.entries.len() {
+                            let index = self.tracker.entries.len() - num;
+                            match self.tracker.delete_task(index) {
+                                Ok(name) => {
+                                    self.message = Some(format!("✓ Deleted task: {}", name));
+                                    self.message_color = Color::Green;
+                                    let _ = self.tracker.save();
+                                }
+                                Err(e) => {
+                                    self.message = Some(format!("✗ Error: {}", e));
+                                    self.message_color = Color::Red;
+                                }
+                            }
+                        } else {
+                            self.message = Some(format!(
+                                "✗ Invalid task number(1-{})",
+                                self.tracker.entries.len()
                             ));
                             self.message_color = Color::Red;
                         }
