@@ -272,7 +272,6 @@ impl App {
         }
 
         // Controls
-        // Controls
         let controls = match self.mode {
             InputMode::Normal => {
                 vec![Line::from(vec![
@@ -347,6 +346,7 @@ impl App {
                 Constraint::Length(3),
                 Constraint::Min(5),
                 Constraint::Length(3),
+                Constraint::Length(3),
             ])
             .split(area);
 
@@ -368,7 +368,7 @@ impl App {
                 .tracker
                 .entries
                 .iter()
-                .rev()
+                //.rev() // removed this because the list was inverted on the history screen
                 .enumerate()
                 .map(|(i, entry)| {
                     let duration = entry.format_duration();
@@ -404,6 +404,14 @@ impl App {
 
             ratatui::widgets::StatefulWidget::render(list, chunks[1], buf, &mut self.list_state);
         }
+        
+        if let Some(ref  msg) = self.message{
+            let message_block = Paragraph::new(msg.as_str())
+                .style(Style::default().fg(self.message_color))
+                .block(Block::bordered());
+            message_block.render(chunks[2], buf);
+        }
+        
         // Controls for Task History
         let controls = match self.mode {
             InputMode::DeleteTask => Paragraph::new(vec![
@@ -431,7 +439,7 @@ impl App {
         .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
         .centered();
 
-        controls.render(chunks[2], buf);
+        controls.render(chunks[3], buf);
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -511,6 +519,7 @@ impl App {
             View::History => match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.view = View::Main;
+                    self.message = None; // Clear message when returning to main
                 }
 
                 // KeyCode to delete task on history
