@@ -7,7 +7,10 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap, calendar::{CalendarEventStore, Monthly}},
+    widgets::{
+        calendar::{CalendarEventStore, Monthly},
+        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
+    },
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
@@ -130,6 +133,51 @@ impl TimeTracker {
         let entry = self.entries.remove(index);
         Ok(entry.activity)
     }
+
+    // Get count of task completed on specific date
+    fn task_on_date(&self, date: chrono::NaiveDate) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                if let Some(end) = entry.end {
+                    end.date_naive() == date
+                } else {
+                    false
+                }
+            })
+            .count()
+    }
+
+    
+    // Duration on a specific date
+    fn duration_on_date (&self, date: chrono::NaiveDate) -> Duration{
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                if let Some(end) = entry.end {
+                    if end.date_naive() == date {
+                        return Some(entry.duration());
+                    }
+                }
+                None
+            })
+            .fold(Duration::zero(), |acc, d| acc + d)
+    }
+
+    // Get task completed in a date range
+    fn task_in_range(&self, start: chrono::NaiveDate, end: chrono::NaiveDate) -> Vec<&TimeEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                if let Some(entry_end) = entry.end {
+                    let entry_date = entry_end.date_naive();
+                    entry_date >= start && entry_date <= end
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
 }
 
 enum InputMode {
@@ -142,6 +190,7 @@ enum InputMode {
 enum View {
     Main,
     History,
+    calendar,
 }
 
 struct App {
@@ -154,6 +203,7 @@ struct App {
     message_color: Color,
     list_state: ListState,
     active_list_state: ListState,
+    calendar_date: DateTime<Local>,
 }
 
 impl App {
@@ -174,6 +224,7 @@ impl App {
             message_color: Color::Green,
             list_state,
             active_list_state,
+            calendar_date: Local::now(),
         }
     }
 
@@ -404,14 +455,14 @@ impl App {
 
             ratatui::widgets::StatefulWidget::render(list, chunks[1], buf, &mut self.list_state);
         }
-        
-        if let Some(ref  msg) = self.message{
+
+        if let Some(ref msg) = self.message {
             let message_block = Paragraph::new(msg.as_str())
                 .style(Style::default().fg(self.message_color))
                 .block(Block::bordered());
             message_block.render(chunks[2], buf);
         }
-        
+
         // Controls for Task History
         let controls = match self.mode {
             InputMode::DeleteTask => Paragraph::new(vec![
