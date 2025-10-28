@@ -7,7 +7,7 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap},
+    widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap, calendar::{CalendarEventStore, Monthly}},
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
