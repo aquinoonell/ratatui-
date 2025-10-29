@@ -17,7 +17,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
-use time::Date as TimeDate;
+use time::{Date as TimeDate, util::days_in_month};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -562,13 +562,13 @@ impl App {
                 let is_current_month = month_num == self.calendar_date.month();
 
                 let border_style = if is_current_month {
-                    Style::default().fg(Color::Cyan).bold()
+                    Style::default().fg(Color::Green).bold()
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
 
                 let title_style = if is_current_month {
-                    Style::default().fg(Color::Cyan).bold()
+                    Style::default().fg(Color::Green).bold()
                 } else {
                     Style::default().fg(Color::White)
                 };
