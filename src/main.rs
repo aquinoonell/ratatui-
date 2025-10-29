@@ -242,6 +242,7 @@ impl App {
         match self.view {
             View::Main => self.render_main_view(area, frame.buffer_mut()),
             View::History => self.render_history_view(area, frame.buffer_mut()),
+            View::calendar => self.render_calendar_view(area, frame.buffer_mut()),
         }
     }
 
@@ -332,6 +333,8 @@ impl App {
                     Span::raw(" Stop Task "),
                     Span::styled("A", Style::default().fg(Color::Red).bold()),
                     Span::raw(" Stop All "),
+                    Span::styled("C", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Calendar "),
                     Span::styled("H", Style::default().fg(Color::Yellow).bold()),
                     Span::raw(" History  "),
                     Span::styled("Q", Style::default().fg(Color::Gray).bold()),
@@ -546,6 +549,10 @@ impl App {
                         self.message = None;
                     }
                 }
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    self.view = View::calendar;
+                    self.message = None;
+                }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
                     let count = self.tracker.stop_all();
                     if count > 0 {
@@ -567,6 +574,41 @@ impl App {
                 }
                 _ => {}
             },
+
+            View::calendar => match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.view = View::Main;
+                    self.message = None;
+                }
+                KeyCode::Left => {
+                    self.calendar_date = if self.calendar_date.month() == 1 {
+                        self.calendar_date
+                            .with_year(self.calendar_date.year() - 1)
+                            .unwrap()
+                            .with_month(12)
+                            .unwrap()
+                    } else {
+                        self.calendar_date
+                            .with_month(self.calendar_date.month() - 1)
+                            .unwrap()
+                    };
+                }
+                KeyCode::Right => {
+                    self.calendar_date = if self.calendar_date.month() == 12 {
+                        self.calendar_date
+                            .with_year(self.calendar_date.year() + 1)
+                            .unwrap()
+                            .with_month(1)
+                            .unwrap()
+                    } else {
+                        self.calendar_date
+                            .with_month(self.calendar_date.month() + 1)
+                            .unwrap()
+                    };
+                }
+                _ => {}
+            },
+
             View::History => match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.view = View::Main;
@@ -777,8 +819,7 @@ impl App {
         let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
 
         let end_of_month = if self.calendar_date.month() == 12 {
-            chrono::NaiveDate::from_ymd_opt(self.calendar_date.year() + 1, 1, 1)
-                .unwrap()
+            chrono::NaiveDate::from_ymd_opt(self.calendar_date.year() + 1, 1, 1).unwrap()
         } else {
             chrono::NaiveDate::from_ymd_opt(
                 self.calendar_date.year(),
@@ -799,39 +840,38 @@ impl App {
         let hours = total_duration.num_hours();
         let minutes = total_duration.num_minutes() % 60;
 
-
         let today = Local::now().date_naive();
         let tasks_today = self.tracker.task_on_date(today);
         let duration_today = self.tracker.duration_on_date(today);
         let today_hours = duration_today.num_hours();
         let today_minutes = duration_today.num_minutes() % 60;
 
-       let stats = Paragraph::new(vec![
-           Line::from(""),
-           Line::from(vec![
-               Span::styled("Today: ", Style::default().fg(Color::Yellow).bold()),
-               Span::styled(
-                   format!("{} tasks, {}h {}m", tasks_today, today_hours, today_minutes),
-                   Style::default().fg(Color::White)
-               ),
-           ]),
-           Line::from(""),
-           Line::from(vec![
-               Span::styled("This Month: ", Style::default().fg(Color::Cyan).bold()),
-               Span::styled(
-                   format!("{} tasks, {}h {}m", tasks_this_month.len(),hours,minutes),
-                   Style::default().fg(Color::White)
-               ),
-           ]),
-       ])
+        let stats = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Today: ", Style::default().fg(Color::Yellow).bold()),
+                Span::styled(
+                    format!("{} tasks, {}h {}m", tasks_today, today_hours, today_minutes),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("This Month: ", Style::default().fg(Color::Cyan).bold()),
+                Span::styled(
+                    format!("{} tasks, {}h {}m", tasks_this_month.len(), hours, minutes),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+        ])
         .block(
-                Block::bordered()
-                    .title(" Statistics ")
-                    .border_style(Style::default().fg(Color::White))
-            )
-                .centered();
+            Block::bordered()
+                .title(" Statistics ")
+                .border_style(Style::default().fg(Color::White)),
+        )
+        .centered();
 
-        stats.render(chunks [2], buf);
+        stats.render(chunks[2], buf);
 
         let controls = Paragraph::new(vec![Line::from(vec![
             Span::styled("←→", Style::default().fg(Color::Yellow).bold()),
@@ -842,6 +882,6 @@ impl App {
         .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
         .centered();
 
-        controls.render(chunks [3], buf);
+        controls.render(chunks[3], buf);
     }
 }
