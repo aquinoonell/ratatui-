@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Local};
+use chrono::{DateTime, Datelike, Duration, Local};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -8,6 +8,7 @@ use ratatui::{
     symbols::border,
     text::{Line, Span, Text},
     widgets::{
+        block::title,
         calendar::{CalendarEventStore, Monthly},
         Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
     },
@@ -148,9 +149,8 @@ impl TimeTracker {
             .count()
     }
 
-    
     // Duration on a specific date
-    fn duration_on_date (&self, date: chrono::NaiveDate) -> Duration{
+    fn duration_on_date(&self, date: chrono::NaiveDate) -> Duration {
         self.entries
             .iter()
             .filter_map(|entry| {
@@ -735,5 +735,113 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn render_calendar_view(&mut self, area: Rect, buf: &mut Buffer) {
+        let chunks = Layout::default()
+            .direction(Duration::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(8),
+                Constraint::Length(3),
+            ])
+            .split(area);
+
+        // Title
+
+        let title = Paragraph::new("Task Calendar")
+            .style(Style::default().fg(Color::Cyan).bold())
+            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
+        title.render(chunks[0], buf);
+
+        // Calendar
+
+        let calendar = Monthly::new(
+            self.calendar_date.date_naive(),
+            CalendarEventStore::default(),
+        )
+        .block(
+            Block::bordered()
+                .title(format!(
+                    " {} {} ",
+                    self.calendar_date.format("%B"),
+                    self.calendar_date.format("%Y")
+                ))
+                .border_style(Style::default().fg(Color::White)),
+        )
+        .show_surrounding(Style::default().fg(Color::DarkGray));
+
+        calendar.render(chunks[1], buf);
+
+        let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
+
+        let end_of_month = if self.calendar_date.month() == 12 {
+            chrono::NaiveDate::from_ymd_opt(self.calendar_date.year() + 1, 1, 1)
+                .unwrap()
+        } else {
+            chrono::NaiveDate::from_ymd_opt(
+                self.calendar_date.year(),
+                self.calendar_date.month() + 1,
+                1,
+            )
+            .unwrap()
+        }
+        .pred_opt()
+        .unwrap();
+
+        let tasks_this_month = self.tracker.task_in_range(start_of_month, end_of_month);
+        let total_duration: Duration = tasks_this_month
+            .iter()
+            .map(|e| e.duration())
+            .fold(Duration::zero(), |acc, d| acc + d);
+
+        let hours = total_duration.num_hours();
+        let minutes = total_duration.num_minutes() % 60;
+
+
+        let today = Local::now().date_naive();
+        let tasks_today = self.tracker.task_on_date(today);
+        let duration_today = self.tracker.duration_on_date(today);
+        let today_hours = duration_today.num_hours();
+        let today_minutes = duration_today.num_minutes() % 60;
+
+       let stats = Paragraph::new(vec![
+           Line::from(""),
+           Line::from(vec![
+               Span::styled("Today: ", Style::default().fg(Color::Yellow).bold()),
+               Span::styled(
+                   format!("{} tasks, {}h {}m", tasks_today, today_hours, today_minutes),
+                   Style::default().fg(Color::White)
+               ),
+           ]),
+           Line::from(""),
+           Line::from(vec![
+               Span::styled("This Month: ", Style::default().fg(Color::Cyan).bold()),
+               Span::styled(
+                   format!("{} tasks, {}h {}m", tasks_this_month.len(),hours,minutes),
+                   Style::default().fg(Color::White)
+               ),
+           ]),
+       ])
+        .block(
+                Block::bordered()
+                    .title(" Statistics ")
+                    .border_style(Style::default().fg(Color::White))
+            )
+                .centered();
+
+        stats.render(chunks [2], buf);
+
+        let controls = Paragraph::new(vec![Line::from(vec![
+            Span::styled("←→", Style::default().fg(Color::Yellow).bold()),
+            Span::raw(" Change Month  "),
+            Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+            Span::raw(" Back to Main"),
+        ])])
+        .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
+        .centered();
+
+        controls.render(chunks [3], buf);
     }
 }
