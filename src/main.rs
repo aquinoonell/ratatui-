@@ -5,20 +5,19 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    symbols::border,
     text::{Line, Span, Text},
     widgets::{
-        block::title,
         calendar::{CalendarEventStore, Monthly},
         Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
     },
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
-use std::{fmt::format, fs};
+use time::Date as TimeDate;
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -54,7 +53,6 @@ impl TimeEntry {
 #[derive(Serialize, Deserialize)]
 struct TimeTracker {
     entries: Vec<TimeEntry>,
-    // Changed the previous Option<TimeEntry for Vec<TimeEntry> in order to get multiple tasks.
     active_entries: Vec<TimeEntry>,
 }
 
@@ -135,7 +133,6 @@ impl TimeTracker {
         Ok(entry.activity)
     }
 
-    // Get count of task completed on specific date
     fn task_on_date(&self, date: chrono::NaiveDate) -> usize {
         self.entries
             .iter()
@@ -149,7 +146,6 @@ impl TimeTracker {
             .count()
     }
 
-    // Duration on a specific date
     fn duration_on_date(&self, date: chrono::NaiveDate) -> Duration {
         self.entries
             .iter()
@@ -164,7 +160,6 @@ impl TimeTracker {
             .fold(Duration::zero(), |acc, d| acc + d)
     }
 
-    // Get task completed in a date range
     fn task_in_range(&self, start: chrono::NaiveDate, end: chrono::NaiveDate) -> Vec<&TimeEntry> {
         self.entries
             .iter()
@@ -185,12 +180,13 @@ enum InputMode {
     StartTask,
     StopTask,
     DeleteTask,
+    SelectDay,
 }
 
 enum View {
     Main,
     History,
-    calendar,
+    Calendar,
 }
 
 struct App {
@@ -204,6 +200,7 @@ struct App {
     list_state: ListState,
     active_list_state: ListState,
     calendar_date: DateTime<Local>,
+    selected_day: Option<chrono::NaiveDate>,
 }
 
 impl App {
@@ -225,6 +222,7 @@ impl App {
             list_state,
             active_list_state,
             calendar_date: Local::now(),
+            selected_day: None,
         }
     }
 
@@ -242,7 +240,7 @@ impl App {
         match self.view {
             View::Main => self.render_main_view(area, frame.buffer_mut()),
             View::History => self.render_history_view(area, frame.buffer_mut()),
-            View::calendar => self.render_calendar_view(area, frame.buffer_mut()),
+            View::Calendar => self.render_calendar_view(area, frame.buffer_mut()),
         }
     }
 
@@ -257,14 +255,11 @@ impl App {
             ])
             .split(area);
 
-        // Title
         let title = Paragraph::new(" ⏱  Time Tracker ")
             .style(Style::default().fg(Color::Cyan).bold())
             .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
         title.render(chunks[0], buf);
 
-        // Status section
-        // Status section - show all active tasks
         let status_text = if self.tracker.active_entries.is_empty() {
             Text::from(vec![
                 Line::from(""),
@@ -315,7 +310,6 @@ impl App {
             .wrap(Wrap { trim: false });
         status_block.render(chunks[1], buf);
 
-        // Message area
         if let Some(ref msg) = self.message {
             let message_block = Paragraph::new(msg.as_str())
                 .style(Style::default().fg(self.message_color))
@@ -323,18 +317,17 @@ impl App {
             message_block.render(chunks[2], buf);
         }
 
-        // Controls
         let controls = match self.mode {
             InputMode::Normal => {
                 vec![Line::from(vec![
                     Span::styled("S", Style::default().fg(Color::Green).bold()),
                     Span::raw(" Start Task  "),
                     Span::styled("X", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop Task "),
+                    Span::raw(" Stop Task  "),
                     Span::styled("A", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop All "),
-                    Span::styled("C", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Calendar "),
+                    Span::raw(" Stop All  "),
+                    Span::styled("C", Style::default().fg(Color::Cyan).bold()),
+                    Span::raw(" Calendar  "),
                     Span::styled("H", Style::default().fg(Color::Yellow).bold()),
                     Span::raw(" History  "),
                     Span::styled("Q", Style::default().fg(Color::Gray).bold()),
@@ -371,15 +364,14 @@ impl App {
                     ]),
                 ]
             }
-            InputMode::DeleteTask => {
-                // DeleteTask UI is only shown in History view, so show normal controls here
+            InputMode::DeleteTask | InputMode::SelectDay => {
                 vec![Line::from(vec![
                     Span::styled("S", Style::default().fg(Color::Green).bold()),
                     Span::raw(" Start Task  "),
                     Span::styled("X", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop Task "),
+                    Span::raw(" Stop Task  "),
                     Span::styled("A", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop All "),
+                    Span::raw(" Stop All  "),
                     Span::styled("H", Style::default().fg(Color::Yellow).bold()),
                     Span::raw(" History  "),
                     Span::styled("Q", Style::default().fg(Color::Gray).bold()),
@@ -404,13 +396,11 @@ impl App {
             ])
             .split(area);
 
-        // Title
         let title = Paragraph::new("Task History ")
             .style(Style::default().fg(Color::Magenta).bold())
             .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
         title.render(chunks[0], buf);
 
-        // History list
         if self.tracker.entries.is_empty() {
             let empty = Paragraph::new("No completed tasks yet")
                 .style(Style::default().fg(Color::DarkGray).italic())
@@ -422,17 +412,13 @@ impl App {
                 .tracker
                 .entries
                 .iter()
-                //.rev() // removed this because the list was inverted on the history screen
                 .enumerate()
                 .map(|(i, entry)| {
                     let duration = entry.format_duration();
                     let date = entry.start.format("%m-%d-%Y %H:%M").to_string();
 
                     let content = Line::from(vec![
-                        Span::styled(
-                            format!("{}. ", self.tracker.entries.len() - i),
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
                         Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
                         Span::raw(" - "),
                         Span::styled(duration, Style::default().fg(Color::Cyan)),
@@ -466,7 +452,6 @@ impl App {
             message_block.render(chunks[2], buf);
         }
 
-        // Controls for Task History
         let controls = match self.mode {
             InputMode::DeleteTask => Paragraph::new(vec![
                 Line::from(vec![
@@ -496,6 +481,234 @@ impl App {
         controls.render(chunks[3], buf);
     }
 
+    fn render_calendar_view(&mut self, area: Rect, buf: &mut Buffer) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(12),
+                Constraint::Length(10),
+                Constraint::Length(3),
+            ])
+            .split(area);
+
+        let title = Paragraph::new(format!(
+            "Task Calendar - {}",
+            self.calendar_date.format("%Y")
+        ))
+        .style(Style::default().fg(Color::Cyan).bold())
+        .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
+        title.render(chunks[0], buf);
+
+        // Create a 3x4 grid for 12 months
+        let calendar_area = chunks[1];
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(calendar_area);
+
+        // Render all 12 months
+        for row_idx in 0..4 {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                    Constraint::Percentage(33),
+                ])
+                .split(rows[row_idx]);
+
+            for col_idx in 0..3 {
+                let month_num = (row_idx * 3 + col_idx + 1) as u32;
+
+                // Create date for this month
+                let month_date =
+                    chrono::NaiveDate::from_ymd_opt(self.calendar_date.year(), month_num, 1)
+                        .unwrap();
+
+                let time_date = TimeDate::from_calendar_date(
+                    month_date.year(),
+                    time::Month::try_from(month_date.month() as u8).unwrap(),
+                    1,
+                )
+                .unwrap();
+
+                // Build event store for this month
+                let mut event_store = CalendarEventStore::default();
+                for entry in &self.tracker.entries {
+                    if let Some(end) = entry.end {
+                        let entry_date = end.date_naive();
+                        if entry_date.year() == month_date.year() && entry_date.month() == month_num
+                        {
+                            let time_entry_date = TimeDate::from_calendar_date(
+                                entry_date.year(),
+                                time::Month::try_from(entry_date.month() as u8).unwrap(),
+                                entry_date.day() as u8,
+                            )
+                            .unwrap();
+
+                            event_store
+                                .add(time_entry_date, Style::default().fg(Color::Green).bold());
+                        }
+                    }
+                }
+
+                // Determine if this is the current selected month
+                let is_current_month = month_num == self.calendar_date.month();
+
+                let border_style = if is_current_month {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let title_style = if is_current_month {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                let month_name = chrono::NaiveDate::from_ymd_opt(2024, month_num, 1)
+                    .unwrap()
+                    .format("%b")
+                    .to_string();
+
+                let calendar = Monthly::new(time_date, event_store)
+                    .block(
+                        Block::bordered()
+                            .title(month_name)
+                            .title_style(title_style)
+                            .border_style(border_style),
+                    )
+                    .show_surrounding(Style::default().fg(Color::DarkGray));
+
+                calendar.render(columns[col_idx], buf);
+            }
+        }
+
+        // Stats and task list for current month
+        let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
+
+        let end_of_month = if self.calendar_date.month() == 12 {
+            chrono::NaiveDate::from_ymd_opt(self.calendar_date.year() + 1, 1, 1).unwrap()
+        } else {
+            chrono::NaiveDate::from_ymd_opt(
+                self.calendar_date.year(),
+                self.calendar_date.month() + 1,
+                1,
+            )
+            .unwrap()
+        }
+        .pred_opt()
+        .unwrap();
+
+        let tasks_this_month = self.tracker.task_in_range(start_of_month, end_of_month);
+        let total_duration: Duration = tasks_this_month
+            .iter()
+            .map(|e| e.duration())
+            .fold(Duration::zero(), |acc, d| acc + d);
+
+        let hours = total_duration.num_hours();
+        let minutes = total_duration.num_minutes() % 60;
+
+        let display_day = self
+            .selected_day
+            .unwrap_or_else(|| Local::now().date_naive());
+        let tasks_on_day = self.tracker.task_on_date(display_day);
+        let duration_on_day = self.tracker.duration_on_date(display_day);
+        let day_hours = duration_on_day.num_hours();
+        let day_minutes = duration_on_day.num_minutes() % 60;
+
+        let mut stats_lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    if self.selected_day.is_some() {
+                        format!("{}: ", display_day.format("%B %d, %Y"))
+                    } else {
+                        "Today: ".to_string()
+                    },
+                    Style::default().fg(Color::Yellow).bold(),
+                ),
+                Span::styled(
+                    format!("{} tasks, {}h {}m", tasks_on_day, day_hours, day_minutes),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("This Month: ", Style::default().fg(Color::Cyan).bold()),
+                Span::styled(
+                    format!("{} tasks, {}h {}m", tasks_this_month.len(), hours, minutes),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+        ];
+
+        if tasks_on_day > 0 {
+            stats_lines.push(Line::from(""));
+            stats_lines.push(Line::from(vec![Span::styled(
+                "Tasks:",
+                Style::default().fg(Color::Yellow).bold(),
+            )]));
+
+            for entry in &self.tracker.entries {
+                if let Some(end) = entry.end {
+                    if end.date_naive() == display_day {
+                        let duration = entry.format_duration();
+                        stats_lines.push(Line::from(vec![
+                            Span::styled("  • ", Style::default().fg(Color::Green)),
+                            Span::styled(&entry.activity, Style::default().fg(Color::White)),
+                            Span::styled(
+                                format!(" ({})", duration),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]));
+                    }
+                }
+            }
+        }
+
+        let stats = Paragraph::new(stats_lines).block(
+            Block::bordered()
+                .title(" Statistics & Tasks ")
+                .border_style(Style::default().fg(Color::White)),
+        );
+
+        stats.render(chunks[2], buf);
+
+        let controls = match self.mode {
+            InputMode::SelectDay => Paragraph::new(vec![
+                Line::from(vec![
+                    Span::raw("Enter day (1-31): "),
+                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" to confirm  "),
+                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" to cancel"),
+                ]),
+            ]),
+            _ => Paragraph::new(vec![Line::from(vec![
+                Span::styled("Arrow Keys", Style::default().fg(Color::Yellow).bold()),
+                Span::raw(" Navigate Months "),
+                Span::styled("D", Style::default().fg(Color::Cyan).bold()),
+                Span::raw(" Select Day  "),
+                Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Back to Main"),
+            ])]),
+        }
+        .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
+        .centered();
+
+        controls.render(chunks[3], buf);
+    }
+
     fn handle_events(&mut self) -> io::Result<()> {
         if event::poll(StdDuration::from_millis(100))? {
             if let Event::Key(key_event) = event::read()? {
@@ -513,6 +726,7 @@ impl App {
             InputMode::StartTask => self.handle_start_task_mode(key_event),
             InputMode::StopTask => self.handle_stop_task_mode(key_event),
             InputMode::DeleteTask => self.handle_delete_task_mode(key_event),
+            InputMode::SelectDay => self.handle_select_day_mode(key_event),
         }
     }
 
@@ -530,7 +744,6 @@ impl App {
                         self.message = Some("✗ No active tasks to stop".to_string());
                         self.message_color = Color::Red;
                     } else if self.tracker.active_entries.len() == 1 {
-                        // Auto-stop if only one task
                         match self.tracker.stop(0) {
                             Ok(name) => {
                                 self.message = Some(format!("✓ Stopped task: {}", name));
@@ -543,14 +756,13 @@ impl App {
                             }
                         }
                     } else {
-                        // Multiple tasks - ask which to stop
                         self.mode = InputMode::StopTask;
                         self.input.clear();
                         self.message = None;
                     }
                 }
                 KeyCode::Char('c') | KeyCode::Char('C') => {
-                    self.view = View::calendar;
+                    self.view = View::Calendar;
                     self.message = None;
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
@@ -575,12 +787,20 @@ impl App {
                 _ => {}
             },
 
-            View::calendar => match key_event.code {
+            View::Calendar => match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.view = View::Main;
+                    self.selected_day = None;
+                    self.message = None;
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.mode = InputMode::SelectDay;
+                    self.input.clear();
                     self.message = None;
                 }
                 KeyCode::Left => {
+                    // Move to previous month
+                    self.selected_day = None;
                     self.calendar_date = if self.calendar_date.month() == 1 {
                         self.calendar_date
                             .with_year(self.calendar_date.year() - 1)
@@ -594,6 +814,8 @@ impl App {
                     };
                 }
                 KeyCode::Right => {
+                    // Move to next month
+                    self.selected_day = None;
                     self.calendar_date = if self.calendar_date.month() == 12 {
                         self.calendar_date
                             .with_year(self.calendar_date.year() + 1)
@@ -606,16 +828,52 @@ impl App {
                             .unwrap()
                     };
                 }
+                KeyCode::Up => {
+                    // Move up 3 months (one row up in the grid)
+                    self.selected_day = None;
+                    let current_month = self.calendar_date.month() as i32;
+                    let new_month = current_month - 3;
+
+                    if new_month <= 0 {
+                        // Wrap to previous year
+                        self.calendar_date = self
+                            .calendar_date
+                            .with_year(self.calendar_date.year() - 1)
+                            .unwrap()
+                            .with_month((new_month + 12) as u32)
+                            .unwrap();
+                    } else {
+                        self.calendar_date =
+                            self.calendar_date.with_month(new_month as u32).unwrap();
+                    }
+                }
+                KeyCode::Down => {
+                    // Move down 3 months (one row down in the grid)
+                    self.selected_day = None;
+                    let current_month = self.calendar_date.month() as i32;
+                    let new_month = current_month + 3;
+
+                    if new_month > 12 {
+                        // Wrap to next year
+                        self.calendar_date = self
+                            .calendar_date
+                            .with_year(self.calendar_date.year() + 1)
+                            .unwrap()
+                            .with_month((new_month - 12) as u32)
+                            .unwrap();
+                    } else {
+                        self.calendar_date =
+                            self.calendar_date.with_month(new_month as u32).unwrap();
+                    }
+                }
                 _ => {}
             },
 
             View::History => match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.view = View::Main;
-                    self.message = None; // Clear message when returning to main
+                    self.message = None;
                 }
-
-                // KeyCode to delete task on history
                 KeyCode::Char('x') | KeyCode::Char('X') => {
                     if self.tracker.entries.is_empty() {
                         self.message = Some("✗ No task to delete".to_string());
@@ -626,7 +884,6 @@ impl App {
                         self.message = None;
                     }
                 }
-
                 KeyCode::Up => {
                     if !self.tracker.entries.is_empty() {
                         let i = self.list_state.selected().unwrap_or(0);
@@ -647,6 +904,7 @@ impl App {
             },
         }
     }
+
     fn handle_start_task_mode(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Enter => {
@@ -736,7 +994,7 @@ impl App {
                 if !self.input.is_empty() {
                     if let Ok(num) = self.input.parse::<usize>() {
                         if num > 0 && num <= self.tracker.entries.len() {
-                            let index = self.tracker.entries.len() - num;
+                            let index = num - 1;
                             match self.tracker.delete_task(index) {
                                 Ok(name) => {
                                     self.message = Some(format!("✓ Deleted task: {}", name));
@@ -750,7 +1008,7 @@ impl App {
                             }
                         } else {
                             self.message = Some(format!(
-                                "✗ Invalid task number(1-{})",
+                                "✗ Invalid task number (1-{})",
                                 self.tracker.entries.len()
                             ));
                             self.message_color = Color::Red;
@@ -779,109 +1037,48 @@ impl App {
         }
     }
 
-    fn render_calendar_view(&mut self, area: Rect, buf: &mut Buffer) {
-        let chunks = Layout::default()
-            .direction(Duration::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(10),
-                Constraint::Length(8),
-                Constraint::Length(3),
-            ])
-            .split(area);
-
-        // Title
-
-        let title = Paragraph::new("Task Calendar")
-            .style(Style::default().fg(Color::Cyan).bold())
-            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
-        title.render(chunks[0], buf);
-
-        // Calendar
-
-        let calendar = Monthly::new(
-            self.calendar_date.date_naive(),
-            CalendarEventStore::default(),
-        )
-        .block(
-            Block::bordered()
-                .title(format!(
-                    " {} {} ",
-                    self.calendar_date.format("%B"),
-                    self.calendar_date.format("%Y")
-                ))
-                .border_style(Style::default().fg(Color::White)),
-        )
-        .show_surrounding(Style::default().fg(Color::DarkGray));
-
-        calendar.render(chunks[1], buf);
-
-        let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
-
-        let end_of_month = if self.calendar_date.month() == 12 {
-            chrono::NaiveDate::from_ymd_opt(self.calendar_date.year() + 1, 1, 1).unwrap()
-        } else {
-            chrono::NaiveDate::from_ymd_opt(
-                self.calendar_date.year(),
-                self.calendar_date.month() + 1,
-                1,
-            )
-            .unwrap()
+    fn handle_select_day_mode(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Enter => {
+                if !self.input.is_empty() {
+                    if let Ok(day) = self.input.parse::<u32>() {
+                        if let Some(date) = chrono::NaiveDate::from_ymd_opt(
+                            self.calendar_date.year(),
+                            self.calendar_date.month(),
+                            day,
+                        ) {
+                            self.selected_day = Some(date);
+                            self.message =
+                                Some(format!("Viewing tasks for {}", date.format("%B %d, %Y")));
+                            self.message_color = Color::Cyan;
+                        } else {
+                            self.message = Some("✗ Invalid day for this month".to_string());
+                            self.message_color = Color::Red;
+                        }
+                    } else {
+                        self.message = Some("✗ Please enter a valid day number".to_string());
+                        self.message_color = Color::Red;
+                    }
+                }
+                self.mode = InputMode::Normal;
+                self.input.clear();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if self.input.len() < 2 {
+                    self.input.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.input.clear();
+                self.selected_day = None;
+                self.message = Some("Cancelled".to_string());
+                self.message_color = Color::Yellow;
+            }
+            _ => {}
         }
-        .pred_opt()
-        .unwrap();
-
-        let tasks_this_month = self.tracker.task_in_range(start_of_month, end_of_month);
-        let total_duration: Duration = tasks_this_month
-            .iter()
-            .map(|e| e.duration())
-            .fold(Duration::zero(), |acc, d| acc + d);
-
-        let hours = total_duration.num_hours();
-        let minutes = total_duration.num_minutes() % 60;
-
-        let today = Local::now().date_naive();
-        let tasks_today = self.tracker.task_on_date(today);
-        let duration_today = self.tracker.duration_on_date(today);
-        let today_hours = duration_today.num_hours();
-        let today_minutes = duration_today.num_minutes() % 60;
-
-        let stats = Paragraph::new(vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Today: ", Style::default().fg(Color::Yellow).bold()),
-                Span::styled(
-                    format!("{} tasks, {}h {}m", tasks_today, today_hours, today_minutes),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("This Month: ", Style::default().fg(Color::Cyan).bold()),
-                Span::styled(
-                    format!("{} tasks, {}h {}m", tasks_this_month.len(), hours, minutes),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-        ])
-        .block(
-            Block::bordered()
-                .title(" Statistics ")
-                .border_style(Style::default().fg(Color::White)),
-        )
-        .centered();
-
-        stats.render(chunks[2], buf);
-
-        let controls = Paragraph::new(vec![Line::from(vec![
-            Span::styled("←→", Style::default().fg(Color::Yellow).bold()),
-            Span::raw(" Change Month  "),
-            Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-            Span::raw(" Back to Main"),
-        ])])
-        .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
-        .centered();
-
-        controls.render(chunks[3], buf);
     }
 }
