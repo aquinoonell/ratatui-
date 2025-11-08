@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, Local};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -7,8 +7,7 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{
-        calendar::{CalendarEventStore, Monthly},
-        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Widget, Wrap,
+        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Table, Widget, Wrap,
     },
     DefaultTerminal, Frame,
 };
@@ -17,7 +16,6 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
-use time::{util::days_in_month, Date as TimeDate};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -486,8 +484,8 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Min(12),
-                Constraint::Length(10),
+                Constraint::Min(10),
+                Constraint::Min(8),
                 Constraint::Length(3),
             ])
             .split(area);
@@ -500,50 +498,116 @@ impl App {
         .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
         title.render(chunks[0], buf);
 
-        // Create a 3x4 grid for 12 months
+        // Build calendar table
         let calendar_area = chunks[1];
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
-            .split(calendar_area);
-
-        // Variables for this change / Calendar View
+        
         let now = chrono::Utc::now();
-        let current_year = now.year();
-        let current_month = now.month();
+        let current_year = self.calendar_date.year();
+        let current_month = self.calendar_date.month();
 
-        //Get month name
+        // Get month name
         let month_name = chrono::Month::try_from(current_month as u8)
             .unwrap_or(chrono::Month::January)
             .name();
-        let bg_color = Color::Rgb(30, 30, 30);
 
-        // Build Header
-        let tittle_text = format!("{} {}", month_name, current_year);
-        let tittle_row = Row::new(vec![Span::styled(
-            format!("{:<66}", tittle_text),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-                .bg(bg_color),
-        )]);
-
-        // Weekly Header
-        let weekday_row = Row::new(vec![
-            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+        // Create calendar content manually
+        let calendar_lines = vec![
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                format!("{} {}", month_name, current_year),
+                Style::default().fg(Color::Cyan).bold(),
+            )]),
+            Line::from(""),
+        ];
         
-            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
-            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
-            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
-            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
-            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
-            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
-        ])
+        let calendar_header = Paragraph::new(calendar_lines)
+            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
+        
+        // Split calendar area into header and grid
+        let calendar_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Min(5),
+            ])
+            .split(calendar_area);
+        
+        calendar_header.render(calendar_chunks[0], buf);
+
+        // Get calendar data
+        let first_of_month = NaiveDate::from_ymd_opt(current_year, current_month, 1).unwrap();
+        let last_of_month = if current_month == 12 {
+            NaiveDate::from_ymd_opt(current_year + 1, 1, 1).unwrap()
+        } else {
+            NaiveDate::from_ymd_opt(current_year, current_month + 1, 1).unwrap()
+        }
+        .pred_opt()
+        .unwrap();
+
+        let first_weekday = first_of_month.weekday().num_days_from_sunday();
+
+        // Build weekday header row
+        let weekday_row = Row::new(vec![
+            Span::styled("Sun           ", Style::default().fg(Color::White)),
+            Span::styled("Mon           ", Style::default().fg(Color::White)),
+            Span::styled("Tue           ", Style::default().fg(Color::White)),
+            Span::styled("Wed           ", Style::default().fg(Color::White)),
+            Span::styled("Thu           ", Style::default().fg(Color::White)),
+            Span::styled("Fri           ", Style::default().fg(Color::White)),
+            Span::styled("Sat           ", Style::default().fg(Color::White)),
+        ]);
+
+        // Create week rows with all 7 columns
+        let mut table_rows = vec![weekday_row];
+        let mut day = 1;
+
+        for week in 0..6 {
+            let mut week_cells = Vec::new();
+            
+            for weekday in 0..7 {
+                // Empty cell before month starts or after month ends
+                if (week == 0 && weekday < first_weekday) || day > last_of_month.day() {
+                    week_cells.push(Span::styled("              ", Style::default()));
+                } else {
+                    // Check if this day has tasks
+                    let day_date = NaiveDate::from_ymd_opt(current_year, current_month, day).unwrap();
+                    let task_count = self.tracker.task_on_date(day_date);
+                    let is_today = now.day() == day && now.month() == current_month && now.year() == current_year;
+                    let is_selected = self.selected_day == Some(day_date);
+                    
+                    let style = if is_selected {
+                        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else if is_today {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    } else if task_count > 0 {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    
+                    week_cells.push(Span::styled(format!("{:<14}", day), style));
+                    day += 1;
+                }
+            }
+            
+            // Only add row if it contains days
+            if !week_cells.iter().all(|s| s.content.trim().is_empty()) {
+                table_rows.push(Row::new(week_cells).height(1));
+            }
+            
+            if day > last_of_month.day() {
+                break;
+            }
+        }
+
+        // Build table with equal width constraints for 7 columns
+        let widths = [Constraint::Percentage(14); 7];
+        
+        let calendar_table = Table::new(table_rows, &widths)
+            .column_spacing(0)
+            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
+        
+        calendar_table.render(calendar_chunks[1], buf);
 
         // Stats and task list for current month
         let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
@@ -584,7 +648,7 @@ impl App {
                     if self.selected_day.is_some() {
                         format!("{}: ", display_day.format("%B %d, %Y"))
                     } else {
-                        "Today: {} ".to_string()
+                        "Today: ".to_string()
                     },
                     Style::default().fg(Color::Yellow).bold(),
                 ),
@@ -753,7 +817,6 @@ impl App {
                     self.message = None;
                 }
                 KeyCode::Left => {
-                    // Move to previous month
                     self.selected_day = None;
                     self.calendar_date = if self.calendar_date.month() == 1 {
                         self.calendar_date
@@ -768,7 +831,6 @@ impl App {
                     };
                 }
                 KeyCode::Right => {
-                    // Move to next month
                     self.selected_day = None;
                     self.calendar_date = if self.calendar_date.month() == 12 {
                         self.calendar_date
@@ -783,13 +845,11 @@ impl App {
                     };
                 }
                 KeyCode::Up => {
-                    // Move up 3 months (one row up in the grid)
                     self.selected_day = None;
                     let current_month = self.calendar_date.month() as i32;
                     let new_month = current_month - 3;
 
                     if new_month <= 0 {
-                        // Wrap to previous year
                         self.calendar_date = self
                             .calendar_date
                             .with_year(self.calendar_date.year() - 1)
@@ -802,13 +862,11 @@ impl App {
                     }
                 }
                 KeyCode::Down => {
-                    // Move down 3 months (one row down in the grid)
                     self.selected_day = None;
                     let current_month = self.calendar_date.month() as i32;
                     let new_month = current_month + 3;
 
                     if new_month > 12 {
-                        // Wrap to next year
                         self.calendar_date = self
                             .calendar_date
                             .with_year(self.calendar_date.year() + 1)
