@@ -2,22 +2,16 @@ use chrono::{DateTime, Datelike, Duration, Local};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span, Text},
-    widgets::{
-        calendar::{CalendarEventStore, Monthly},
-        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
-    },
-    DefaultTerminal, Frame,
+    DefaultTerminal, Frame, buffer::Buffer, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span, Text}, widgets::{
+        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap, block::Title, calendar::{CalendarEventStore, Monthly}
+    }
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
-use time::{Date as TimeDate, util::days_in_month};
+use time::{util::days_in_month, Date as TimeDate};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -256,8 +250,9 @@ impl App {
             .split(area);
 
         let title = Paragraph::new(" ⏱  Time Tracker ")
-            .style(Style::default().fg(Color::Cyan).bold())
-            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
+            .centered()
+            .style(Style::default().fg(Color::Magenta).bold())
+            .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
         title.render(chunks[0], buf);
 
         let status_text = if self.tracker.active_entries.is_empty() {
@@ -397,6 +392,7 @@ impl App {
             .split(area);
 
         let title = Paragraph::new("Task History ")
+            .centered()
             .style(Style::default().fg(Color::Magenta).bold())
             .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
         title.render(chunks[0], buf);
@@ -493,11 +489,12 @@ impl App {
             .split(area);
 
         let title = Paragraph::new(format!(
-            "Task Calendar - {}",
-            self.calendar_date.format("%Y")
+            "Task Calendar - {} ",
+            self.calendar_date.format("%Y, %m")
         ))
-        .style(Style::default().fg(Color::Cyan).bold())
-        .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
+        .centered()
+        .style(Style::default().fg(Color::Magenta).bold())
+        .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
         title.render(chunks[0], buf);
 
         // Create a 3x4 grid for 12 months
@@ -552,8 +549,9 @@ impl App {
                             )
                             .unwrap();
 
+                            // Current Day 
                             event_store
-                                .add(time_entry_date, Style::default().fg(Color::Green).bold());
+                                .add(time_entry_date, Style::default().fg(Color::Cyan).bold());
                         }
                     }
                 }
@@ -562,13 +560,13 @@ impl App {
                 let is_current_month = month_num == self.calendar_date.month();
 
                 let border_style = if is_current_month {
-                    Style::default().fg(Color::Green).bold()
+                    Style::default().fg(Color::Magenta).bold()
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
 
                 let title_style = if is_current_month {
-                    Style::default().fg(Color::Green).bold()
+                    Style::default().fg(Color::Magenta).bold()
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -674,7 +672,8 @@ impl App {
 
         let stats = Paragraph::new(stats_lines).block(
             Block::bordered()
-                .title(" Statistics & Tasks ")
+                .title(
+                    Title::from(" Statistics & Tasks ").alignment(Alignment::Center))
                 .border_style(Style::default().fg(Color::White)),
         );
 
