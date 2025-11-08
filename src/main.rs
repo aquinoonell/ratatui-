@@ -578,6 +578,7 @@ impl App {
                 calendar.render(columns[col_idx], buf);
             }
         }
+    }
 
         // Stats and task list for current month
         let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
