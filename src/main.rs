@@ -2,16 +2,22 @@ use chrono::{DateTime, Datelike, Duration, Local};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    DefaultTerminal, Frame, buffer::Buffer, layout::{Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span, Text}, widgets::{
-        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Widget, Wrap, calendar::{CalendarEventStore, Monthly}
-    }
+    buffer::Buffer,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span, Text},
+    widgets::{
+        calendar::{CalendarEventStore, Monthly},
+        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Widget, Wrap,
+    },
+    DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
-use time::{Date as TimeDate, util::days_in_month};
+use time::{util::days_in_month, Date as TimeDate};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -494,91 +500,50 @@ impl App {
         .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
         title.render(chunks[0], buf);
 
-        // Build header with row 
-        let title_text = format!("{} {}", month_name, current_year);
-        
-        // Weekday header - 7 day
+        // Create a 3x4 grid for 12 months
+        let calendar_area = chunks[1];
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(calendar_area);
+
+        // Variables for this change / Calendar View
+        let now = chrono::Utc::now();
+        let current_year = now.year();
+        let current_month = now.month();
+
+        //Get month name
+        let month_name = chrono::Month::try_from(current_month as u8)
+            .unwrap_or(chrono::Month::January)
+            .name();
+        let bg_color = Color::Rgb(30, 30, 30);
+
+        // Build Header
+        let tittle_text = format!("{} {}", month_name, current_year);
+        let tittle_row = Row::new(vec![Span::styled(
+            format!("{:<66}", tittle_text),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+                .bg(bg_color),
+        )]);
+
+        // Weekly Header
         let weekday_row = Row::new(vec![
-            Span::styled("Sun       ", Style::default().fg(Color::White)),
-            Span::styled("Mon       ", Style::default().fg(Color::White)),
-            Span::styled("Tue       ", Style::default().fg(Color::White)),
-            Span::styled("Wed       ", Style::default().fg(Color::White)),
-            Span::styled("Thu       ", Style::default().fg(Color::White)),
-            Span::styled("Fri       ", Style::default().fg(Color::White)),
-            Span::styled("Sat       ", Style::default().fg(Color::White)),
-        ]);
-
-        // Week Rows
-        let mut rows = vec![tittle_row, weekday_row];
-        let mut day = 1;
-
-
-
-                // Create date for this month
-                let month_date =
-                    chrono::NaiveDate::from_ymd_opt(self.calendar_date.year(), month_num, 1)
-                        .unwrap();
-
-                let time_date = TimeDate::from_calendar_date(
-                    month_date.year(),
-                    time::Month::try_from(month_date.month() as u8).unwrap(),
-                    1,
-                )
-                .unwrap();
-
-                // Build event store for this month
-                let mut event_store = CalendarEventStore::default();
-                for entry in &self.tracker.entries {
-                    if let Some(end) = entry.end {
-                        let entry_date = end.date_naive();
-                        if entry_date.year() == month_date.year() && entry_date.month() == month_num
-                        {
-                            let time_entry_date = TimeDate::from_calendar_date(
-                                entry_date.year(),
-                                time::Month::try_from(entry_date.month() as u8).unwrap(),
-                                entry_date.day() as u8,
-                            )
-                            .unwrap();
-
-                            event_store
-                                .add(time_entry_date, Style::default().fg(Color::Green).bold());
-                        }
-                    }
-                }
-
-                // Determine if this is the current selected month
-                let is_current_month = month_num == self.calendar_date.month();
-
-                let border_style = if is_current_month {
-                    Style::default().fg(Color::Green).bold()
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-
-                let title_style = if is_current_month {
-                    Style::default().fg(Color::Green).bold()
-                } else {
-                    Style::default().fg(Color::White)
-                };
-
-                let month_name = chrono::NaiveDate::from_ymd_opt(2024, month_num, 1)
-                    .unwrap()
-                    .format("%b")
-                    .to_string();
-
-                let calendar = Monthly::new(time_date, event_store)
-                    .block(
-                        Block::bordered()
-                            .title(month_name)
-                            .title_style(title_style)
-                            .border_style(border_style),
-                    )
-                    .show_surrounding(Style::default().fg(Color::DarkGray));
-
-                calendar.render(columns[col_idx], buf);
-            }
-        }
-    }
+            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+        
+            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+            Span::styled("Sun       ",Style::default().fg(Color::White).bg(bg_color)),
+        ])
 
         // Stats and task list for current month
         let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
@@ -619,7 +584,7 @@ impl App {
                     if self.selected_day.is_some() {
                         format!("{}: ", display_day.format("%B %d, %Y"))
                     } else {
-                        "Today: ".to_string()
+                        "Today: {} ".to_string()
                     },
                     Style::default().fg(Color::Yellow).bold(),
                 ),
