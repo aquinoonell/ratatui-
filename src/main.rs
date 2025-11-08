@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate};
+use chrono::{DateTime, Datelike, Duration, Local};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -7,7 +7,8 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{
-        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Table, Widget, Wrap,
+        calendar::{CalendarEventStore, Monthly},
+        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
     },
     DefaultTerminal, Frame,
 };
@@ -16,6 +17,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
+use time::{Date as TimeDate, util::days_in_month};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -484,8 +486,8 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Min(10),
-                Constraint::Min(8),
+                Constraint::Min(12),
+                Constraint::Length(10),
                 Constraint::Length(3),
             ])
             .split(area);
@@ -498,116 +500,96 @@ impl App {
         .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
         title.render(chunks[0], buf);
 
-        // Build calendar table
+        // Create a 3x4 grid for 12 months
         let calendar_area = chunks[1];
-        
-        let now = chrono::Utc::now();
-        let current_year = self.calendar_date.year();
-        let current_month = self.calendar_date.month();
-
-        // Get month name
-        let month_name = chrono::Month::try_from(current_month as u8)
-            .unwrap_or(chrono::Month::January)
-            .name();
-
-        // Create calendar content manually
-        let calendar_lines = vec![
-            Line::from(""),
-            Line::from(vec![Span::styled(
-                format!("{} {}", month_name, current_year),
-                Style::default().fg(Color::Cyan).bold(),
-            )]),
-            Line::from(""),
-        ];
-        
-        let calendar_header = Paragraph::new(calendar_lines)
-            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
-        
-        // Split calendar area into header and grid
-        let calendar_chunks = Layout::default()
+        let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(5),
-                Constraint::Min(5),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
             ])
             .split(calendar_area);
-        
-        calendar_header.render(calendar_chunks[0], buf);
 
-        // Get calendar data
-        let first_of_month = NaiveDate::from_ymd_opt(current_year, current_month, 1).unwrap();
-        let last_of_month = if current_month == 12 {
-            NaiveDate::from_ymd_opt(current_year + 1, 1, 1).unwrap()
-        } else {
-            NaiveDate::from_ymd_opt(current_year, current_month + 1, 1).unwrap()
-        }
-        .pred_opt()
-        .unwrap();
+        // Render all 12 months
+        for row_idx in 0..4 {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                    Constraint::Percentage(33),
+                ])
+                .split(rows[row_idx]);
 
-        let first_weekday = first_of_month.weekday().num_days_from_sunday();
+            for col_idx in 0..3 {
+                let month_num = (row_idx * 3 + col_idx + 1) as u32;
 
-        // Build weekday header row
-        let weekday_row = Row::new(vec![
-            Span::styled("Sun           ", Style::default().fg(Color::White)),
-            Span::styled("Mon           ", Style::default().fg(Color::White)),
-            Span::styled("Tue           ", Style::default().fg(Color::White)),
-            Span::styled("Wed           ", Style::default().fg(Color::White)),
-            Span::styled("Thu           ", Style::default().fg(Color::White)),
-            Span::styled("Fri           ", Style::default().fg(Color::White)),
-            Span::styled("Sat           ", Style::default().fg(Color::White)),
-        ]);
+                // Create date for this month
+                let month_date =
+                    chrono::NaiveDate::from_ymd_opt(self.calendar_date.year(), month_num, 1)
+                        .unwrap();
 
-        // Create week rows with all 7 columns
-        let mut table_rows = vec![weekday_row];
-        let mut day = 1;
+                let time_date = TimeDate::from_calendar_date(
+                    month_date.year(),
+                    time::Month::try_from(month_date.month() as u8).unwrap(),
+                    1,
+                )
+                .unwrap();
 
-        for week in 0..6 {
-            let mut week_cells = Vec::new();
-            
-            for weekday in 0..7 {
-                // Empty cell before month starts or after month ends
-                if (week == 0 && weekday < first_weekday) || day > last_of_month.day() {
-                    week_cells.push(Span::styled("              ", Style::default()));
-                } else {
-                    // Check if this day has tasks
-                    let day_date = NaiveDate::from_ymd_opt(current_year, current_month, day).unwrap();
-                    let task_count = self.tracker.task_on_date(day_date);
-                    let is_today = now.day() == day && now.month() == current_month && now.year() == current_year;
-                    let is_selected = self.selected_day == Some(day_date);
-                    
-                    let style = if is_selected {
-                        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-                    } else if is_today {
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                    } else if task_count > 0 {
-                        Style::default().fg(Color::Green)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    
-                    week_cells.push(Span::styled(format!("{:<14}", day), style));
-                    day += 1;
+                // Build event store for this month
+                let mut event_store = CalendarEventStore::default();
+                for entry in &self.tracker.entries {
+                    if let Some(end) = entry.end {
+                        let entry_date = end.date_naive();
+                        if entry_date.year() == month_date.year() && entry_date.month() == month_num
+                        {
+                            let time_entry_date = TimeDate::from_calendar_date(
+                                entry_date.year(),
+                                time::Month::try_from(entry_date.month() as u8).unwrap(),
+                                entry_date.day() as u8,
+                            )
+                            .unwrap();
+
+                            event_store
+                                .add(time_entry_date, Style::default().fg(Color::Green).bold());
+                        }
+                    }
                 }
-            }
-            
-            // Only add row if it contains days
-            if !week_cells.iter().all(|s| s.content.trim().is_empty()) {
-                table_rows.push(Row::new(week_cells).height(1));
-            }
-            
-            if day > last_of_month.day() {
-                break;
+
+                // Determine if this is the current selected month
+                let is_current_month = month_num == self.calendar_date.month();
+
+                let border_style = if is_current_month {
+                    Style::default().fg(Color::Green).bold()
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let title_style = if is_current_month {
+                    Style::default().fg(Color::Green).bold()
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                let month_name = chrono::NaiveDate::from_ymd_opt(2024, month_num, 1)
+                    .unwrap()
+                    .format("%b")
+                    .to_string();
+
+                let calendar = Monthly::new(time_date, event_store)
+                    .block(
+                        Block::bordered()
+                            .title(month_name)
+                            .title_style(title_style)
+                            .border_style(border_style),
+                    )
+                    .show_surrounding(Style::default().fg(Color::DarkGray));
+
+                calendar.render(columns[col_idx], buf);
             }
         }
-
-        // Build table with equal width constraints for 7 columns
-        let widths = [Constraint::Percentage(14); 7];
-        
-        let calendar_table = Table::new(table_rows, &widths)
-            .column_spacing(0)
-            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
-        
-        calendar_table.render(calendar_chunks[1], buf);
 
         // Stats and task list for current month
         let start_of_month = self.calendar_date.with_day(1).unwrap().date_naive();
@@ -817,6 +799,7 @@ impl App {
                     self.message = None;
                 }
                 KeyCode::Left => {
+                    // Move to previous month
                     self.selected_day = None;
                     self.calendar_date = if self.calendar_date.month() == 1 {
                         self.calendar_date
@@ -831,6 +814,7 @@ impl App {
                     };
                 }
                 KeyCode::Right => {
+                    // Move to next month
                     self.selected_day = None;
                     self.calendar_date = if self.calendar_date.month() == 12 {
                         self.calendar_date
@@ -845,11 +829,13 @@ impl App {
                     };
                 }
                 KeyCode::Up => {
+                    // Move up 3 months (one row up in the grid)
                     self.selected_day = None;
                     let current_month = self.calendar_date.month() as i32;
                     let new_month = current_month - 3;
 
                     if new_month <= 0 {
+                        // Wrap to previous year
                         self.calendar_date = self
                             .calendar_date
                             .with_year(self.calendar_date.year() - 1)
@@ -862,11 +848,13 @@ impl App {
                     }
                 }
                 KeyCode::Down => {
+                    // Move down 3 months (one row down in the grid)
                     self.selected_day = None;
                     let current_month = self.calendar_date.month() as i32;
                     let new_month = current_month + 3;
 
                     if new_month > 12 {
+                        // Wrap to next year
                         self.calendar_date = self
                             .calendar_date
                             .with_year(self.calendar_date.year() + 1)
@@ -1094,3 +1082,4 @@ impl App {
         }
     }
 }
+
