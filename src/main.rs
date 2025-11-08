@@ -2,15 +2,9 @@ use chrono::{DateTime, Datelike, Duration, Local};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span, Text},
-    widgets::{
-        calendar::{CalendarEventStore, Monthly},
-        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
-    },
-    DefaultTerminal, Frame,
+    DefaultTerminal, Frame, buffer::Buffer, layout::{Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span, Text}, widgets::{
+        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Widget, Wrap, calendar::{CalendarEventStore, Monthly}
+    }
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -500,31 +494,25 @@ impl App {
         .block(Block::bordered().border_style(Style::default().fg(Color::Cyan)));
         title.render(chunks[0], buf);
 
-        // Create a 3x4 grid for 12 months
-        let calendar_area = chunks[1];
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
-            .split(calendar_area);
+        // Build header with row 
+        let title_text = format!("{} {}", month_name, current_year);
+        
+        // Weekday header - 7 day
+        let weekday_row = Row::new(vec![
+            Span::styled("Sun       ", Style::default().fg(Color::White)),
+            Span::styled("Mon       ", Style::default().fg(Color::White)),
+            Span::styled("Tue       ", Style::default().fg(Color::White)),
+            Span::styled("Wed       ", Style::default().fg(Color::White)),
+            Span::styled("Thu       ", Style::default().fg(Color::White)),
+            Span::styled("Fri       ", Style::default().fg(Color::White)),
+            Span::styled("Sat       ", Style::default().fg(Color::White)),
+        ]);
 
-        // Render all 12 months
-        for row_idx in 0..4 {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(33),
-                    Constraint::Percentage(34),
-                    Constraint::Percentage(33),
-                ])
-                .split(rows[row_idx]);
+        // Week Rows
+        let mut rows = vec![tittle_row, weekday_row];
+        let mut day = 1;
 
-            for col_idx in 0..3 {
-                let month_num = (row_idx * 3 + col_idx + 1) as u32;
+
 
                 // Create date for this month
                 let month_date =
