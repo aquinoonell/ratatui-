@@ -25,6 +25,7 @@ struct TimeEntry {
     activity: String,
     start: DateTime<Local>,
     end: Option<DateTime<Local>>,
+    target_duration: Option<Duration>,
 }
 
 impl TimeEntry {
@@ -41,6 +42,11 @@ impl TimeEntry {
         let minutes = duration.num_minutes() % 60;
         let seconds = duration.num_seconds() % 60;
         format!("{}h {}m {}s", hours, minutes, seconds)
+    }
+
+    // Countdown Implementation
+    fn format_countdown(&self) -> String {
+        todo!()
     }
 }
 
