@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, Local};
+use chrono::{DateTime, Datelike, Duration, Local, format};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -7,7 +7,7 @@ use ratatui::{
     }
 };
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::{fs, string};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
@@ -29,6 +29,26 @@ struct TimeEntry {
 }
 
 impl TimeEntry {
+    
+    fn format_countdown(&self) -> string{
+        if let Some(target) = self.target_duration {
+            let elapsed = self.duration();
+            let remaining = target - elapsed;
+
+            if remaining.num_seconds() <= 0 {
+                return "DONE!".to_string();
+            }
+
+
+            let hours = remaining.num_hours();
+            let minutes = remaining.num_minutes() % 60;
+            let seconds= remaining.num_seconds() % 60;
+            format!("{}h {}m {}s" ,hours, minutes, seconds)
+        }else {
+            self.format_duration()
+        }
+    }
+
     fn duration(&self) -> Duration {
         match self.end {
             Some(end) => end.signed_duration_since(self.start),
