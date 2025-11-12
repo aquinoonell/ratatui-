@@ -30,6 +30,7 @@ struct TimeEntry {
 
 impl TimeEntry {
     
+    //Format time remainig for countdown
     fn format_countdown(&self) -> string{
         if let Some(target) = self.target_duration {
             let elapsed = self.duration();
@@ -49,6 +50,28 @@ impl TimeEntry {
         }
     }
 
+    //Check if entry is a countdown
+    fn is_countdown(&self) -> bool{
+        self.target_duration.is_some()
+    }
+
+    fn is_countdown_complete(&self) -> bool {
+        if let Some(target) = self.target_duration{
+            let elapsed = self.duration();
+            let remainig = target - elapsed;
+            remainig.num_seconds() <= 0
+        }else {
+            false
+        }
+    }
+
+    fn remainig_duration(&self) -> Option<Duration>{
+        self.target_duration.map(|target|{
+            let elapsed = self.duration();
+            target - elapsed
+        })
+    }
+
     fn duration(&self) -> Duration {
         match self.end {
             Some(end) => end.signed_duration_since(self.start),
@@ -64,10 +87,6 @@ impl TimeEntry {
         format!("{}h {}m {}s", hours, minutes, seconds)
     }
 
-    // Countdown Implementation
-    fn format_countdown(&self) -> String {
-        todo!()
-    }
 }
 
 #[derive(Serialize, Deserialize)]
