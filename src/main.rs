@@ -1,16 +1,23 @@
-use chrono::{DateTime, Datelike, Duration, Local, format};
+use chrono::{format, DateTime, Datelike, Duration, Local};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    DefaultTerminal, Frame, buffer::Buffer, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span, Text}, widgets::{
-        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap, block::Title, calendar::{CalendarEventStore, Monthly}
-    }
+    buffer::Buffer,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span, Text},
+    widgets::{
+        block::Title,
+        calendar::{CalendarEventStore, Monthly},
+        Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
+    },
+    DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, string};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
+use std::{fs, string};
 use time::{util::days_in_month, Date as TimeDate};
 
 fn main() -> io::Result<()> {
@@ -29,9 +36,8 @@ struct TimeEntry {
 }
 
 impl TimeEntry {
-    
     //Format time remainig for countdown
-    fn format_countdown(&self) -> string{
+    fn format_countdown(&self) -> String {
         if let Some(target) = self.target_duration {
             let elapsed = self.duration();
             let remaining = target - elapsed;
@@ -40,33 +46,32 @@ impl TimeEntry {
                 return "DONE!".to_string();
             }
 
-
             let hours = remaining.num_hours();
             let minutes = remaining.num_minutes() % 60;
-            let seconds= remaining.num_seconds() % 60;
-            format!("{}h {}m {}s" ,hours, minutes, seconds)
-        }else {
+            let seconds = remaining.num_seconds() % 60;
+            format!("{}h {}m {}s", hours, minutes, seconds)
+        } else {
             self.format_duration()
         }
     }
 
     //Check if entry is a countdown
-    fn is_countdown(&self) -> bool{
+    fn is_countdown(&self) -> bool {
         self.target_duration.is_some()
     }
 
     fn is_countdown_complete(&self) -> bool {
-        if let Some(target) = self.target_duration{
+        if let Some(target) = self.target_duration {
             let elapsed = self.duration();
             let remainig = target - elapsed;
             remainig.num_seconds() <= 0
-        }else {
+        } else {
             false
         }
     }
 
-    fn remainig_duration(&self) -> Option<Duration>{
-        self.target_duration.map(|target|{
+    fn remainig_duration(&self) -> Option<Duration> {
+        self.target_duration.map(|target| {
             let elapsed = self.duration();
             target - elapsed
         })
@@ -86,7 +91,6 @@ impl TimeEntry {
         let seconds = duration.num_seconds() % 60;
         format!("{}h {}m {}s", hours, minutes, seconds)
     }
-
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,7 +131,14 @@ impl TimeTracker {
         Ok(())
     }
 
+
     fn start(&mut self, name: &str) -> Result<(), String> {
+        if self.active_entries.iter().any(|e| e.activity == name) {
+            return Err(format!("Task '{}' is already active", name));
+        }
+        Ok(())
+    }
+    fn start_countdown(&mut self, name: &str, minutes: i64) -> Result<(), String> {
         if self.active_entries.iter().any(|e| e.activity == name) {
             return Err(format!("Task '{}' is already active", name));
         }
@@ -135,10 +146,12 @@ impl TimeTracker {
         self.active_entries.push(TimeEntry {
             activity: name.to_string(),
             start: Local::now(),
+            target_duration:Some(Duration::minutes(minutes)),
             end: None,
         });
         Ok(())
     }
+
 
     fn stop(&mut self, index: usize) -> Result<String, String> {
         if index >= self.active_entries.len() {
@@ -594,7 +607,7 @@ impl App {
                             )
                             .unwrap();
 
-                            // Current Day 
+                            // Current Day
                             event_store
                                 .add(time_entry_date, Style::default().fg(Color::Cyan).bold());
                         }
@@ -717,8 +730,7 @@ impl App {
 
         let stats = Paragraph::new(stats_lines).block(
             Block::bordered()
-                .title(
-                    Title::from(" Statistics & Tasks ").alignment(Alignment::Center))
+                .title(Title::from(" Statistics & Tasks ").alignment(Alignment::Center))
                 .border_style(Style::default().fg(Color::White)),
         );
 
