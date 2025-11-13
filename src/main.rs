@@ -1,4 +1,5 @@
 use chrono::{format, DateTime, Datelike, Duration, Local};
+use std::process::Command;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -135,7 +136,7 @@ impl TimeTracker {
         if self.active_entries.iter().any(|e| e.activity == name) {
             return Err(format!("Task '{}' is already active", name));
         }
-        self.active_entries.push(TimeEntry{
+        self.active_entries.push(TimeEntry {
             activity: name.to_string(),
             start: Local::now(),
             target_duration: None,
@@ -167,13 +168,12 @@ impl TimeTracker {
 
         if let Some(target) = entry.target_duration {
             let target_end = entry.start + target;
-            if now > target_end{
+            if now > target_end {
                 entry.end = Some(target_end);
-                print!("\x07");
-            }else {
+            } else {
                 entry.end = Some(now);
             }
-        }else {
+        } else {
             entry.end = Some(now);
         }
 
@@ -190,12 +190,12 @@ impl TimeTracker {
             if let Some(target) = entry.target_duration {
                 let target_end = entry.start + target;
 
-                if now > target_end{
+                if now > target_end {
                     entry.end = Some(target_end);
-                }else {
+                } else {
                     entry.end = Some(now);
                 }
-            }else {
+            } else {
                 entry.end = Some(now);
             }
             self.entries.push(entry);
@@ -389,6 +389,31 @@ impl App {
             }
         }
 
+        // Auto-stop completed countdowns and notify
+        let mut completed_indices = Vec::new();
+        for (i, entry) in self.tracker.active_entries.iter().enumerate() {
+            if entry.is_countdown() && entry.is_countdown_complete() {
+                completed_indices.push(i);
+            }
+        }
+
+        // Stop them in reverse order to maintain correct indices
+        for i in completed_indices.iter().rev() {
+            if let Ok(name) = self.tracker.stop(*i) {
+                // Send macOS notification using osascript
+                let _ = Command::new("osascript")
+                    .arg("-e")
+                    .arg(format!(
+                "display notification \"Task '{}' is done!\" with title \"Countdown Complete!\"",
+                name
+            ))
+                    .spawn();
+
+                self.message = Some(format!("Countdown Complete: {} - DONE!", name));
+                self.message_color = Color::Green;
+                let _ = self.tracker.save();
+            }
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
