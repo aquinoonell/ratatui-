@@ -230,6 +230,7 @@ impl TimeTracker {
 enum InputMode {
     Normal,
     StartTask,
+    StartCountdown,
     StopTask,
     DeleteTask,
     SelectDay,
@@ -278,6 +279,7 @@ impl App {
         }
     }
 
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
@@ -296,7 +298,104 @@ impl App {
         }
     }
 
+    fn handle_countdown_input(&mut self,key_event: KeyEvent){
+        match key_event.code {
+            KeyCode::Enter => {
+                if !self.input.is_empty(){
+                    if let Some((name, minutes_str)) = self.input.split_once(':'){
+                        if let Ok(minutes) = minutes_str.parse::<i64>(){
+                            if minutes > 0 {
+                                match self.tracker.start_countdown(name.trim(), minutes) {
+                                    Ok(_) => {
+                                        self.message = Some(format!(
+                                        "Started countdown: {} ({} min)",
+                                        name.trim(),
+                                        minutes
+                                    ));
+                                    self.message_color = Color::Green;
+                                    let _ = self.tracker.save();
+                                    }
+                                    Err(e) => {
+                                        self.message = Some(format!("Error: {}", e));
+                                        self.message_color = Color::Red;
+                                    }
+                                }
+                            }else {
+                                self.message = Some("Minutes must be positive".to_string());
+                                self.message_color = Color::Red;
+                            }
+                        }else {
+                            self.message = Some("Invalid minutes format".to_string());
+                            self.message_color = Color::Red;
+                        }
+                    }else {
+                        self.message = Some("Format: TaskName:Minutes (e.g., Study:25)".to_string());
+                        self.message_color = Color::Red;
+                    }
+                }
+                self.mode = InputMode::Normal;
+                self.input.clear();
+            }
+            KeyCode::Char(e) => {
+                self.input.push(e);
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.input.clear();
+                self.message = Some("Cancelled".to_string());
+                self.message_color = Color::Yellow;
+            }
+
+            _ => {}
+        }
+    }
+
     fn render_main_view(&mut self, area: Rect, buf: &mut Buffer) {
+
+        for (i, entry) in self.tracker.active_entries.iter().enumerate(){
+            let duration_text = if entry.is_countdown(){
+                entry.format_duration()
+            }else {
+                entry.format_duration()
+            };
+
+            let icon = if entry.is_countdown(){
+                " ⏱ "
+            }else {
+               " ● "
+            };
+
+
+            let time_color = if entry.is_countdown(){
+                if entry.is_countdown_complete(){
+                    Color::Red
+                }else if let Some(remaining) = entry.remainig_duration() {
+                    if remaining.num_minutes() < 5 {
+                        Color::Red
+                    } else if remaining.num_minutes() < 10 {
+                        Color::Yellow
+                    } else {
+                        Color::Cyan
+                    }
+                }else {
+                    Color::Cyan
+                }
+            } else {
+                Color::Cyan
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(icon, Style::default().fg(Color::Green).bold()),
+                Span::styled(format!("{}.", i + 1), Style::default().fg(Color::DarkGray)),
+                Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
+                Span::raw("-"),
+                Span::styled(duration_text, Style::default().fg(time_color).bold()),
+            ]));
+        }
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -780,6 +879,7 @@ impl App {
         match self.mode {
             InputMode::Normal => self.handle_normal_mode(key_event),
             InputMode::StartTask => self.handle_start_task_mode(key_event),
+            InputMode::StartCountdown=> self.handle_countdown_input(key_event),
             InputMode::StopTask => self.handle_stop_task_mode(key_event),
             InputMode::DeleteTask => self.handle_delete_task_mode(key_event),
             InputMode::SelectDay => self.handle_select_day_mode(key_event),
@@ -790,6 +890,11 @@ impl App {
         match self.view {
             View::Main => match key_event.code {
                 KeyCode::Char('q') | KeyCode::Char('Q') => self.exit = true,
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    self.mode = InputMode::StartCountdown;
+                    self.input.clear();
+                    self.message = None;
+                }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
                     self.mode = InputMode::StartTask;
                     self.input.clear();
