@@ -14,10 +14,10 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
-use std::{future::IntoFuture, io};
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 use std::{fs, string};
+use std::{future::IntoFuture, io};
 use time::{util::days_in_month, Date as TimeDate};
 
 fn main() -> io::Result<()> {
@@ -131,11 +131,16 @@ impl TimeTracker {
         Ok(())
     }
 
-
     fn start(&mut self, name: &str) -> Result<(), String> {
         if self.active_entries.iter().any(|e| e.activity == name) {
             return Err(format!("Task '{}' is already active", name));
         }
+        self.active_entries.push(TimeEntry{
+            activity: name.to_string(),
+            start: Local::now(),
+            target_duration: None,
+            end: None,
+        });
         Ok(())
     }
     fn start_countdown(&mut self, name: &str, minutes: i64) -> Result<(), String> {
@@ -146,12 +151,11 @@ impl TimeTracker {
         self.active_entries.push(TimeEntry {
             activity: name.to_string(),
             start: Local::now(),
-            target_duration:Some(Duration::minutes(minutes)),
+            target_duration: Some(Duration::minutes(minutes)),
             end: None,
         });
         Ok(())
     }
-
 
     fn stop(&mut self, index: usize) -> Result<String, String> {
         if index >= self.active_entries.len() {
@@ -159,7 +163,20 @@ impl TimeTracker {
         }
 
         let mut entry = self.active_entries.remove(index);
-        entry.end = Some(Local::now());
+        let now = Local::now();
+
+        if let Some(target) = entry.target_duration {
+            let target_end = entry.start + target;
+            if now > target_end{
+                entry.end = Some(target_end);
+                print!("\x07");
+            }else {
+                entry.end = Some(now);
+            }
+        }else {
+            entry.end = Some(now);
+        }
+
         let name = entry.activity.clone();
         self.entries.push(entry);
         Ok(name)
@@ -170,7 +187,17 @@ impl TimeTracker {
         let now = Local::now();
 
         for mut entry in self.active_entries.drain(..) {
-            entry.end = Some(now);
+            if let Some(target) = entry.target_duration {
+                let target_end = entry.start + target;
+
+                if now > target_end{
+                    entry.end = Some(target_end);
+                }else {
+                    entry.end = Some(now);
+                }
+            }else {
+                entry.end = Some(now);
+            }
             self.entries.push(entry);
         }
 
@@ -279,7 +306,6 @@ impl App {
         }
     }
 
-
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
@@ -298,38 +324,39 @@ impl App {
         }
     }
 
-    fn handle_countdown_input(&mut self,key_event: KeyEvent){
+    fn handle_countdown_input(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Enter => {
-                if !self.input.is_empty(){
-                    if let Some((name, minutes_str)) = self.input.split_once(':'){
-                        if let Ok(minutes) = minutes_str.parse::<i64>(){
+                if !self.input.is_empty() {
+                    if let Some((name, minutes_str)) = self.input.split_once(':') {
+                        if let Ok(minutes) = minutes_str.parse::<i64>() {
                             if minutes > 0 {
                                 match self.tracker.start_countdown(name.trim(), minutes) {
                                     Ok(_) => {
                                         self.message = Some(format!(
-                                        "Started countdown: {} ({} min)",
-                                        name.trim(),
-                                        minutes
-                                    ));
-                                    self.message_color = Color::Green;
-                                    let _ = self.tracker.save();
+                                            "Started countdown: {} ({} min)",
+                                            name.trim(),
+                                            minutes
+                                        ));
+                                        self.message_color = Color::Green;
+                                        let _ = self.tracker.save();
                                     }
                                     Err(e) => {
                                         self.message = Some(format!("Error: {}", e));
                                         self.message_color = Color::Red;
                                     }
                                 }
-                            }else {
+                            } else {
                                 self.message = Some("Minutes must be positive".to_string());
                                 self.message_color = Color::Red;
                             }
-                        }else {
+                        } else {
                             self.message = Some("Invalid minutes format".to_string());
                             self.message_color = Color::Red;
                         }
-                    }else {
-                        self.message = Some("Format: TaskName:Minutes (e.g., Study:25)".to_string());
+                    } else {
+                        self.message =
+                            Some("Format: TaskName:Minutes (e.g., Study:25)".to_string());
                         self.message_color = Color::Red;
                     }
                 }
@@ -354,46 +381,12 @@ impl App {
     }
 
     fn render_main_view(&mut self, area: Rect, buf: &mut Buffer) {
-
-        for (i, entry) in self.tracker.active_entries.iter().enumerate(){
-            let duration_text = if entry.is_countdown(){
-                entry.format_duration()
-            }else {
-                entry.format_duration()
-            };
-
-            let icon = if entry.is_countdown(){
-                " ⏱ "
-            }else {
-               " ● "
-            };
-
-
-            let time_color = if entry.is_countdown(){
-                if entry.is_countdown_complete(){
-                    Color::Red
-                }else if let Some(remaining) = entry.remainig_duration() {
-                    if remaining.num_minutes() < 5 {
-                        Color::Red
-                    } else if remaining.num_minutes() < 10 {
-                        Color::Yellow
-                    } else {
-                        Color::Cyan
-                    }
-                }else {
-                    Color::Cyan
-                }
-            } else {
-                Color::Cyan
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(icon, Style::default().fg(Color::Green).bold()),
-                Span::styled(format!("{}.", i + 1), Style::default().fg(Color::DarkGray)),
-                Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
-                Span::raw("-"),
-                Span::styled(duration_text, Style::default().fg(time_color).bold()),
-            ]));
+        // Keep this loop to trigger countdown updates
+        for entry in self.tracker.active_entries.iter() {
+            if entry.is_countdown() {
+                let _ = entry.is_countdown_complete();
+                let _ = entry.remainig_duration();
+            }
         }
 
         let chunks = Layout::default()
@@ -441,18 +434,48 @@ impl App {
             ];
 
             for (i, entry) in self.tracker.active_entries.iter().enumerate() {
-                let duration = entry.format_duration();
+                let duration_text = if entry.is_countdown() {
+                    entry.format_countdown()
+                } else {
+                    entry.format_duration()
+                };
+
+                let icon = if entry.is_countdown() {
+                    " ⏱ "
+                } else {
+                    " ● "
+                };
+
+                let time_color = if entry.is_countdown() {
+                    if entry.is_countdown_complete() {
+                        Color::Red
+                    } else if let Some(remaining) = entry.remainig_duration() {
+                        if remaining.num_minutes() < 5 {
+                            Color::Red
+                        } else if remaining.num_minutes() < 10 {
+                            Color::Yellow
+                        } else {
+                            Color::Cyan
+                        }
+                    } else {
+                        Color::Cyan
+                    }
+                } else {
+                    Color::Cyan
+                };
+
                 lines.push(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(Color::Green).bold()),
+                    Span::styled(icon, Style::default().fg(Color::Green).bold()),
                     Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
                     Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
                     Span::raw(" - "),
-                    Span::styled(duration, Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(duration_text, Style::default().fg(time_color).bold()),
                 ]));
             }
 
             Text::from(lines)
         };
+
         let status_block = Paragraph::new(status_text)
             .block(
                 Block::bordered()
@@ -462,6 +485,7 @@ impl App {
             .wrap(Wrap { trim: false });
         status_block.render(chunks[1], buf);
 
+        // Message block (you were missing this)
         if let Some(ref msg) = self.message {
             let message_block = Paragraph::new(msg.as_str())
                 .style(Style::default().fg(self.message_color))
@@ -469,6 +493,7 @@ impl App {
             message_block.render(chunks[2], buf);
         }
 
+        // Controls block (you were missing this)
         let controls = match self.mode {
             InputMode::Normal => {
                 vec![Line::from(vec![
@@ -492,15 +517,14 @@ impl App {
                 vec![
                     Line::from(vec![
                         Span::raw("Task:Minutes (e.g., Study:25): "),
-                        Span::styled(&self.input,Style::default().fg(Color::Yellow)),
-                        Span::styled("█",Style::default().fg(Color::Yellow)),
+                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                        Span::styled("█", Style::default().fg(Color::Yellow)),
                     ]),
                     Line::from(vec![
-                        Span::styled("Enter",Style::default().fg(Color::Green).bold()),
+                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
                         Span::raw(" to start "),
-                        Span::styled("Esc",Style::default().fg(Color::Red).bold()),
+                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
                         Span::raw(" to cancel "),
-
                     ]),
                 ]
             }
@@ -897,7 +921,7 @@ impl App {
         match self.mode {
             InputMode::Normal => self.handle_normal_mode(key_event),
             InputMode::StartTask => self.handle_start_task_mode(key_event),
-            InputMode::StartCountdown=> self.handle_countdown_input(key_event),
+            InputMode::StartCountdown => self.handle_countdown_input(key_event),
             InputMode::StopTask => self.handle_stop_task_mode(key_event),
             InputMode::DeleteTask => self.handle_delete_task_mode(key_event),
             InputMode::SelectDay => self.handle_select_day_mode(key_event),
