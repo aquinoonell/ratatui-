@@ -14,7 +14,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
-use std::io;
+use std::{future::IntoFuture, io};
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 use std::{fs, string};
@@ -476,6 +476,8 @@ impl App {
                     Span::raw(" Start Task  "),
                     Span::styled("X", Style::default().fg(Color::Red).bold()),
                     Span::raw(" Stop Task  "),
+                    Span::styled("T", Style::default().fg(Color::Magenta).bold()),
+                    Span::raw(" Countdown "),
                     Span::styled("A", Style::default().fg(Color::Red).bold()),
                     Span::raw(" Stop All  "),
                     Span::styled("C", Style::default().fg(Color::Cyan).bold()),
@@ -485,6 +487,22 @@ impl App {
                     Span::styled("Q", Style::default().fg(Color::Gray).bold()),
                     Span::raw(" Quit "),
                 ])]
+            }
+            InputMode::StartCountdown => {
+                vec![
+                    Line::from(vec![
+                        Span::raw("Task:Minutes (e.g., Study:25): "),
+                        Span::styled(&self.input,Style::default().fg(Color::Yellow)),
+                        Span::styled("█",Style::default().fg(Color::Yellow)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Enter",Style::default().fg(Color::Green).bold()),
+                        Span::raw(" to start "),
+                        Span::styled("Esc",Style::default().fg(Color::Red).bold()),
+                        Span::raw(" to cancel "),
+
+                    ]),
+                ]
             }
             InputMode::StartTask => {
                 vec![
