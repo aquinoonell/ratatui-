@@ -1,5 +1,4 @@
 use chrono::{format, DateTime, Datelike, Duration, Local};
-use std::process::Command;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -389,31 +388,6 @@ impl App {
             }
         }
 
-        // Auto-stop completed countdowns and notify
-        let mut completed_indices = Vec::new();
-        for (i, entry) in self.tracker.active_entries.iter().enumerate() {
-            if entry.is_countdown() && entry.is_countdown_complete() {
-                completed_indices.push(i);
-            }
-        }
-
-        // Stop them in reverse order to maintain correct indices
-        for i in completed_indices.iter().rev() {
-            if let Ok(name) = self.tracker.stop(*i) {
-                // Send macOS notification using osascript
-                let _ = Command::new("osascript")
-                    .arg("-e")
-                    .arg(format!(
-                "display notification \"Task '{}' is done!\" with title \"Countdown Complete!\"",
-                name
-            ))
-                    .spawn();
-
-                self.message = Some(format!("Countdown Complete: {} - DONE!", name));
-                self.message_color = Color::Green;
-                let _ = self.tracker.save();
-            }
-        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -510,7 +484,6 @@ impl App {
             .wrap(Wrap { trim: false });
         status_block.render(chunks[1], buf);
 
-        // Message block (you were missing this)
         if let Some(ref msg) = self.message {
             let message_block = Paragraph::new(msg.as_str())
                 .style(Style::default().fg(self.message_color))
@@ -518,7 +491,6 @@ impl App {
             message_block.render(chunks[2], buf);
         }
 
-        // Controls block (you were missing this)
         let controls = match self.mode {
             InputMode::Normal => {
                 vec![Line::from(vec![
