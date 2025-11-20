@@ -380,201 +380,202 @@ impl App {
     }
 
     fn render_main_view(&mut self, area: Rect, buf: &mut Buffer) {
-        // Keep this loop to trigger countdown updates
-        for entry in self.tracker.active_entries.iter() {
-            if entry.is_countdown() {
-                let _ = entry.is_countdown_complete();
-                let _ = entry.remainig_duration();
-            }
+    // Keep this loop to trigger countdown updates
+    for entry in self.tracker.active_entries.iter() {
+        if entry.is_countdown() {
+            let _ = entry.is_countdown_complete();
+            let _ = entry.remainig_duration();
         }
+    }
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(5),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(area);
 
-        let title = Paragraph::new(" ⏱  Time Tracker ")
-            .centered()
-            .style(Style::default().fg(Color::Magenta).bold())
-            .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
-        title.render(chunks[0], buf);
+    let title = Paragraph::new(" ⏱  Time Tracker ")
+        .centered()
+        .style(Style::default().fg(Color::Magenta).bold())
+        .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
+    title.render(chunks[0], buf);
 
-        let status_text = if self.tracker.active_entries.is_empty() {
-            Text::from(vec![
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("○ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        "No active tasks",
-                        Style::default().fg(Color::DarkGray).italic(),
-                    ),
-                ]),
-            ])
-        } else {
-            let mut lines = vec![
-                Line::from(vec![Span::styled(
-                    format!(
-                        "{} Active Task{}",
-                        self.tracker.active_entries.len(),
-                        if self.tracker.active_entries.len() == 1 {
-                            ""
-                        } else {
-                            "s"
-                        }
-                    ),
-                    Style::default().fg(Color::Yellow).bold(),
-                )]),
-                Line::from(""),
-            ];
+    let status_text = if self.tracker.active_entries.is_empty() {
+        Text::from(vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("○ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "No active tasks",
+                    Style::default().fg(Color::DarkGray).italic(),
+                ),
+            ]),
+        ])
+    } else {
+        let mut lines = vec![
+            Line::from(vec![Span::styled(
+                format!(
+                    "{} Active Task{}",
+                    self.tracker.active_entries.len(),
+                    if self.tracker.active_entries.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                Style::default().fg(Color::Yellow).bold(),
+            )]),
+            Line::from(""),
+        ];
 
-            for (i, entry) in self.tracker.active_entries.iter().enumerate() {
-                let duration_text = if entry.is_countdown() {
-                    entry.format_countdown()
-                } else {
-                    entry.format_duration()
-                };
+        for (i, entry) in self.tracker.active_entries.iter().enumerate() {
+            let duration_text = if entry.is_countdown() {
+                entry.format_countdown()
+            } else {
+                entry.format_duration()
+            };
 
-                let icon = if entry.is_countdown() {
-                    " ⏱ "
-                } else {
-                    " ● "
-                };
+            let icon = if entry.is_countdown() {
+                " ⏱ "
+            } else {
+                " ● "
+            };
 
-                let time_color = if entry.is_countdown() {
-                    if entry.is_countdown_complete() {
+            let time_color = if entry.is_countdown() {
+                if entry.is_countdown_complete() {
+                    Color::Red
+                } else if let Some(remaining) = entry.remainig_duration() {
+                    if remaining.num_minutes() < 5 {
                         Color::Red
-                    } else if let Some(remaining) = entry.remainig_duration() {
-                        if remaining.num_minutes() < 5 {
-                            Color::Red
-                        } else if remaining.num_minutes() < 10 {
-                            Color::Yellow
-                        } else {
-                            Color::Cyan
-                        }
+                    } else if remaining.num_minutes() < 10 {
+                        Color::Yellow
                     } else {
                         Color::Cyan
                     }
                 } else {
                     Color::Cyan
-                };
+                }
+            } else {
+                Color::Cyan
+            };
 
-                lines.push(Line::from(vec![
-                    Span::styled(icon, Style::default().fg(Color::Green).bold()),
-                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
-                    Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
-                    Span::raw(" - "),
-                    Span::styled(duration_text, Style::default().fg(time_color).bold()),
-                ]));
-            }
-
-            Text::from(lines)
-        };
-
-        let status_block = Paragraph::new(status_text)
-            .block(
-                Block::bordered()
-                    .title(" Current Status ")
-                    .border_style(Style::default().fg(Color::White)),
-            )
-            .wrap(Wrap { trim: false });
-        status_block.render(chunks[1], buf);
-
-        if let Some(ref msg) = self.message {
-            let message_block = Paragraph::new(msg.as_str())
-                .style(Style::default().fg(self.message_color))
-                .block(Block::bordered());
-            message_block.render(chunks[2], buf);
+            lines.push(Line::from(vec![
+                Span::styled(icon, Style::default().fg(Color::Green).bold()),
+                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
+                Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
+                Span::raw(" - "),
+                Span::styled(duration_text, Style::default().fg(time_color).bold()),
+            ]));
         }
 
-        let controls = match self.mode {
-            InputMode::Normal => {
-                vec![Line::from(vec![
-                    Span::styled("S", Style::default().fg(Color::Green).bold()),
-                    Span::raw(" Start Task  "),
-                    Span::styled("X", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop Task  "),
-                    Span::styled("T", Style::default().fg(Color::Magenta).bold()),
-                    Span::raw(" Countdown "),
-                    Span::styled("A", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop All  "),
-                    Span::styled("C", Style::default().fg(Color::Cyan).bold()),
-                    Span::raw(" Calendar  "),
-                    Span::styled("H", Style::default().fg(Color::Yellow).bold()),
-                    Span::raw(" History  "),
-                    Span::styled("Q", Style::default().fg(Color::Gray).bold()),
-                    Span::raw(" Quit "),
-                ])]
-            }
-            InputMode::StartCountdown => {
-                vec![
-                    Line::from(vec![
-                        Span::raw("Task:Minutes (e.g., Study:25): "),
-                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
-                        Span::styled("█", Style::default().fg(Color::Yellow)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                        Span::raw(" to start "),
-                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                        Span::raw(" to cancel "),
-                    ]),
-                ]
-            }
-            InputMode::StartTask => {
-                vec![
-                    Line::from(vec![
-                        Span::raw("Task name: "),
-                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
-                        Span::styled("█", Style::default().fg(Color::Yellow)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                        Span::raw(" to confirm  "),
-                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                        Span::raw(" to cancel"),
-                    ]),
-                ]
-            }
-            InputMode::StopTask => {
-                vec![
-                    Line::from(vec![
-                        Span::raw("Task number to stop: "),
-                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
-                        Span::styled("█", Style::default().fg(Color::Yellow)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                        Span::raw(" to confirm "),
-                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                        Span::raw(" to cancel"),
-                    ]),
-                ]
-            }
-            InputMode::DeleteTask | InputMode::SelectDay => {
-                vec![Line::from(vec![
-                    Span::styled("S", Style::default().fg(Color::Green).bold()),
-                    Span::raw(" Start Task  "),
-                    Span::styled("X", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop Task  "),
-                    Span::styled("A", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop All  "),
-                    Span::styled("H", Style::default().fg(Color::Yellow).bold()),
-                    Span::raw(" History  "),
-                    Span::styled("Q", Style::default().fg(Color::Gray).bold()),
-                    Span::raw(" Quit "),
-                ])]
-            }
-        };
-        let controls_block = Paragraph::new(controls)
-            .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
-            .centered();
-        controls_block.render(chunks[3], buf);
+        Text::from(lines)
+    };
+
+    let status_block = Paragraph::new(status_text)
+        .block(
+            Block::bordered()
+                .title(" Current Status ")
+                .border_style(Style::default().fg(Color::White)),
+        )
+        .wrap(Wrap { trim: false });
+    status_block.render(chunks[1], buf);
+
+    if let Some(ref msg) = self.message {
+        let message_block = Paragraph::new(msg.as_str())
+            .style(Style::default().fg(self.message_color))
+            .block(Block::bordered());
+        message_block.render(chunks[2], buf);
     }
+
+    let controls = match self.mode {
+        InputMode::Normal => {
+            vec![Line::from(vec![
+                Span::styled("S", Style::default().fg(Color::Green).bold()),
+                Span::raw(" Start Task  "),
+                Span::styled("X", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Stop Task  "),
+                Span::styled("T", Style::default().fg(Color::Magenta).bold()),
+                Span::raw(" Countdown "),
+                Span::styled("A", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Stop All  "),
+                Span::styled("C", Style::default().fg(Color::Cyan).bold()),
+                Span::raw(" Calendar  "),
+                Span::styled("H", Style::default().fg(Color::Yellow).bold()),
+                Span::raw(" History  "),
+                Span::styled("Q", Style::default().fg(Color::Gray).bold()),
+                Span::raw(" Quit "),
+            ])]
+        }
+        InputMode::StartCountdown => {
+            vec![
+                Line::from(vec![
+                    Span::raw("Task:Minutes (e.g., Study:25): "),
+                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" to start "),
+                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" to cancel "),
+                ]),
+            ]
+        }
+        InputMode::StartTask => {
+            vec![
+                Line::from(vec![
+                    Span::raw("Task name: "),
+                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" to confirm  "),
+                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" to cancel"),
+                ]),
+            ]
+        }
+        InputMode::StopTask => {
+            vec![
+                Line::from(vec![
+                    Span::raw("Task number to stop: "),
+                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" to confirm "),
+                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" to cancel"),
+                ]),
+            ]
+        }
+        InputMode::DeleteTask | InputMode::SelectDay => {
+            vec![Line::from(vec![
+                Span::styled("S", Style::default().fg(Color::Green).bold()),
+                Span::raw(" Start Task  "),
+                Span::styled("X", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Stop Task  "),
+                Span::styled("A", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Stop All  "),
+                Span::styled("H", Style::default().fg(Color::Yellow).bold()),
+                Span::raw(" History  "),
+                Span::styled("Q", Style::default().fg(Color::Gray).bold()),
+                Span::raw(" Quit "),
+            ])]
+        }
+    };
+    let controls_block = Paragraph::new(controls)
+        .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
+        .centered();
+    controls_block.render(chunks[3], buf);
+}
+
 
     fn render_history_view(&mut self, area: Rect, buf: &mut Buffer) {
         let chunks = Layout::default()
