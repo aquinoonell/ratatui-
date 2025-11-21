@@ -455,14 +455,14 @@ impl App {
 
                 let time_color = if entry.is_countdown() {
                     if entry.is_countdown_complete() {
-                        Color::Red
+                        Color::Magenta
                     } else if let Some(remaining) = entry.remainig_duration() {
                         if remaining.num_minutes() < 1 {
                             Color::Red
                         } else if remaining.num_minutes() < 5 {
                             Color::Yellow
                         } else if remaining.num_minutes() < 10 {
-                            Color::LightYellow
+                            Color::Green
                         } else {
                             Color::Cyan
                         }
