@@ -1,5 +1,6 @@
 use chrono::{format, DateTime, Datelike, Duration, Local};
 use color_eyre::Result;
+use core::num;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
@@ -14,10 +15,10 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 use std::{fs, string};
 use std::{future::IntoFuture, io};
+use std::{path::PathBuf, usize};
 use time::{util::days_in_month, Date as TimeDate};
 
 fn main() -> io::Result<()> {
@@ -211,6 +212,12 @@ impl TimeTracker {
         Ok(entry.activity)
     }
 
+    fn delete_all(&mut self) -> usize {
+        let count = self.entries.len();
+        self.entries.clear();
+        count
+    }
+
     fn task_on_date(&self, date: chrono::NaiveDate) -> usize {
         self.entries
             .iter()
@@ -258,6 +265,7 @@ enum InputMode {
     StartTask,
     StartCountdown,
     StopTask,
+    ConfirmDeleteAll,
     DeleteTask,
     SelectDay,
 }
@@ -380,202 +388,211 @@ impl App {
     }
 
     fn render_main_view(&mut self, area: Rect, buf: &mut Buffer) {
-    // Keep this loop to trigger countdown updates
-    for entry in self.tracker.active_entries.iter() {
-        if entry.is_countdown() {
-            let _ = entry.is_countdown_complete();
-            let _ = entry.remainig_duration();
+        // Keep this loop to trigger countdown updates
+        for entry in self.tracker.active_entries.iter() {
+            if entry.is_countdown() {
+                let _ = entry.is_countdown_complete();
+                let _ = entry.remainig_duration();
+            }
         }
-    }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
-        .split(area);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(5),
+                Constraint::Length(3),
+                Constraint::Length(3),
+            ])
+            .split(area);
 
-    let title = Paragraph::new(" ⏱  Time Tracker ")
-        .centered()
-        .style(Style::default().fg(Color::Magenta).bold())
-        .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
-    title.render(chunks[0], buf);
+        let title = Paragraph::new(" ⏱  Time Tracker ")
+            .centered()
+            .style(Style::default().fg(Color::Magenta).bold())
+            .block(Block::bordered().border_style(Style::default().fg(Color::Magenta)));
+        title.render(chunks[0], buf);
 
-    let status_text = if self.tracker.active_entries.is_empty() {
-        Text::from(vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("○ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    "No active tasks",
-                    Style::default().fg(Color::DarkGray).italic(),
-                ),
-            ]),
-        ])
-    } else {
-        let mut lines = vec![
-            Line::from(vec![Span::styled(
-                format!(
-                    "{} Active Task{}",
-                    self.tracker.active_entries.len(),
-                    if self.tracker.active_entries.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ),
-                Style::default().fg(Color::Yellow).bold(),
-            )]),
-            Line::from(""),
-        ];
+        let status_text = if self.tracker.active_entries.is_empty() {
+            Text::from(vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("○ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        "No active tasks",
+                        Style::default().fg(Color::DarkGray).italic(),
+                    ),
+                ]),
+            ])
+        } else {
+            let mut lines = vec![
+                Line::from(vec![Span::styled(
+                    format!(
+                        "{} Active Task{}",
+                        self.tracker.active_entries.len(),
+                        if self.tracker.active_entries.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ),
+                    Style::default().fg(Color::Yellow).bold(),
+                )]),
+                Line::from(""),
+            ];
 
-        for (i, entry) in self.tracker.active_entries.iter().enumerate() {
-            let duration_text = if entry.is_countdown() {
-                entry.format_countdown()
-            } else {
-                entry.format_duration()
-            };
+            for (i, entry) in self.tracker.active_entries.iter().enumerate() {
+                let duration_text = if entry.is_countdown() {
+                    entry.format_countdown()
+                } else {
+                    entry.format_duration()
+                };
 
-            let icon = if entry.is_countdown() {
-                " ⏱ "
-            } else {
-                " ● "
-            };
+                let icon = if entry.is_countdown() {
+                    " ⏱ "
+                } else {
+                    " ● "
+                };
 
-            let time_color = if entry.is_countdown() {
-                if entry.is_countdown_complete() {
-                    Color::Red
-                } else if let Some(remaining) = entry.remainig_duration() {
-                    if remaining.num_minutes() < 5 {
+                let time_color = if entry.is_countdown() {
+                    if entry.is_countdown_complete() {
                         Color::Red
-                    } else if remaining.num_minutes() < 10 {
-                        Color::Yellow
+                    } else if let Some(remaining) = entry.remainig_duration() {
+                        if remaining.num_minutes() < 1 {
+                            Color::Red
+                        } else if remaining.num_minutes() < 5 {
+                            Color::Yellow
+                        } else if remaining.num_minutes() < 10 {
+                            Color::LightYellow
+                        } else {
+                            Color::Cyan
+                        }
                     } else {
                         Color::Cyan
                     }
                 } else {
                     Color::Cyan
-                }
-            } else {
-                Color::Cyan
-            };
+                };
 
-            lines.push(Line::from(vec![
-                Span::styled(icon, Style::default().fg(Color::Green).bold()),
-                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
-                Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
-                Span::raw(" - "),
-                Span::styled(duration_text, Style::default().fg(time_color).bold()),
-            ]));
+                lines.push(Line::from(vec![
+                    Span::styled(icon, Style::default().fg(Color::Green).bold()),
+                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::styled(&entry.activity, Style::default().fg(Color::White).bold()),
+                    Span::raw(" - "),
+                    Span::styled(duration_text, Style::default().fg(time_color).bold()),
+                ]));
+            }
+
+            Text::from(lines)
+        };
+
+        let status_block = Paragraph::new(status_text)
+            .block(
+                Block::bordered()
+                    .title(" Current Status ")
+                    .border_style(Style::default().fg(Color::White)),
+            )
+            .wrap(Wrap { trim: false });
+        status_block.render(chunks[1], buf);
+
+        if let Some(ref msg) = self.message {
+            let message_block = Paragraph::new(msg.as_str())
+                .style(Style::default().fg(self.message_color))
+                .block(Block::bordered());
+            message_block.render(chunks[2], buf);
         }
 
-        Text::from(lines)
-    };
-
-    let status_block = Paragraph::new(status_text)
-        .block(
-            Block::bordered()
-                .title(" Current Status ")
-                .border_style(Style::default().fg(Color::White)),
-        )
-        .wrap(Wrap { trim: false });
-    status_block.render(chunks[1], buf);
-
-    if let Some(ref msg) = self.message {
-        let message_block = Paragraph::new(msg.as_str())
-            .style(Style::default().fg(self.message_color))
-            .block(Block::bordered());
-        message_block.render(chunks[2], buf);
+        let controls = match self.mode {
+            InputMode::Normal => {
+                vec![Line::from(vec![
+                    Span::styled("S", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" Start Task  "),
+                    Span::styled("X", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop Task  "),
+                    Span::styled("T", Style::default().fg(Color::Magenta).bold()),
+                    Span::raw(" Countdown "),
+                    Span::styled("A", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop All  "),
+                    Span::styled("C", Style::default().fg(Color::Cyan).bold()),
+                    Span::raw(" Calendar  "),
+                    Span::styled("H", Style::default().fg(Color::Yellow).bold()),
+                    Span::raw(" History  "),
+                    Span::styled("Q", Style::default().fg(Color::Gray).bold()),
+                    Span::raw(" Quit "),
+                ])]
+            }
+            InputMode::StartCountdown => {
+                vec![
+                    Line::from(vec![
+                        Span::raw("Task:Minutes (e.g., Study:25): "),
+                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                        Span::styled("█", Style::default().fg(Color::Yellow)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                        Span::raw(" to start "),
+                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                        Span::raw(" to cancel "),
+                    ]),
+                ]
+            }
+            InputMode::StartTask => {
+                vec![
+                    Line::from(vec![
+                        Span::raw("Task name: "),
+                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                        Span::styled("█", Style::default().fg(Color::Yellow)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                        Span::raw(" to confirm  "),
+                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                        Span::raw(" to cancel"),
+                    ]),
+                ]
+            }
+            InputMode::StopTask => {
+                vec![
+                    Line::from(vec![
+                        Span::raw("Task number to stop: "),
+                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
+                        Span::styled("█", Style::default().fg(Color::Yellow)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                        Span::raw(" to confirm "),
+                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                        Span::raw(" to cancel"),
+                    ]),
+                ]
+            }
+            InputMode::DeleteTask | InputMode::SelectDay => {
+                vec![Line::from(vec![
+                    Span::styled("S", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" Start Task  "),
+                    Span::styled("X", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop Task  "),
+                    Span::styled("A", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Stop All  "),
+                    Span::styled("H", Style::default().fg(Color::Yellow).bold()),
+                    Span::raw(" History  "),
+                    Span::styled("Q", Style::default().fg(Color::Gray).bold()),
+                    Span::raw(" Quit "),
+                ])]
+            }
+            InputMode::ConfirmDeleteAll => {
+                vec![Line::from(vec![
+                    Span::styled("Y", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" Confirm Delete All  "),
+                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" Cancel  "),
+                ])]
+            }
+        };
+        let controls_block = Paragraph::new(controls)
+            .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
+            .centered();
+        controls_block.render(chunks[3], buf);
     }
-
-    let controls = match self.mode {
-        InputMode::Normal => {
-            vec![Line::from(vec![
-                Span::styled("S", Style::default().fg(Color::Green).bold()),
-                Span::raw(" Start Task  "),
-                Span::styled("X", Style::default().fg(Color::Red).bold()),
-                Span::raw(" Stop Task  "),
-                Span::styled("T", Style::default().fg(Color::Magenta).bold()),
-                Span::raw(" Countdown "),
-                Span::styled("A", Style::default().fg(Color::Red).bold()),
-                Span::raw(" Stop All  "),
-                Span::styled("C", Style::default().fg(Color::Cyan).bold()),
-                Span::raw(" Calendar  "),
-                Span::styled("H", Style::default().fg(Color::Yellow).bold()),
-                Span::raw(" History  "),
-                Span::styled("Q", Style::default().fg(Color::Gray).bold()),
-                Span::raw(" Quit "),
-            ])]
-        }
-        InputMode::StartCountdown => {
-            vec![
-                Line::from(vec![
-                    Span::raw("Task:Minutes (e.g., Study:25): "),
-                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
-                    Span::styled("█", Style::default().fg(Color::Yellow)),
-                ]),
-                Line::from(vec![
-                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                    Span::raw(" to start "),
-                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" to cancel "),
-                ]),
-            ]
-        }
-        InputMode::StartTask => {
-            vec![
-                Line::from(vec![
-                    Span::raw("Task name: "),
-                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
-                    Span::styled("█", Style::default().fg(Color::Yellow)),
-                ]),
-                Line::from(vec![
-                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                    Span::raw(" to confirm  "),
-                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" to cancel"),
-                ]),
-            ]
-        }
-        InputMode::StopTask => {
-            vec![
-                Line::from(vec![
-                    Span::raw("Task number to stop: "),
-                    Span::styled(&self.input, Style::default().fg(Color::Yellow)),
-                    Span::styled("█", Style::default().fg(Color::Yellow)),
-                ]),
-                Line::from(vec![
-                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                    Span::raw(" to confirm "),
-                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" to cancel"),
-                ]),
-            ]
-        }
-        InputMode::DeleteTask | InputMode::SelectDay => {
-            vec![Line::from(vec![
-                Span::styled("S", Style::default().fg(Color::Green).bold()),
-                Span::raw(" Start Task  "),
-                Span::styled("X", Style::default().fg(Color::Red).bold()),
-                Span::raw(" Stop Task  "),
-                Span::styled("A", Style::default().fg(Color::Red).bold()),
-                Span::raw(" Stop All  "),
-                Span::styled("H", Style::default().fg(Color::Yellow).bold()),
-                Span::raw(" History  "),
-                Span::styled("Q", Style::default().fg(Color::Gray).bold()),
-                Span::raw(" Quit "),
-            ])]
-        }
-    };
-    let controls_block = Paragraph::new(controls)
-        .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
-        .centered();
-    controls_block.render(chunks[3], buf);
-}
-
 
     fn render_history_view(&mut self, area: Rect, buf: &mut Buffer) {
         let chunks = Layout::default()
@@ -659,13 +676,21 @@ impl App {
                     Span::raw(" to cancel"),
                 ]),
             ]),
+            InputMode::ConfirmDeleteAll => Paragraph::new(vec![Line::from(vec![
+                Span::styled("Y", Style::default().fg(Color::Green).bold()),
+                Span::raw(" Confirm Delete All  "),
+                Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Cancel  "),
+            ])]),
             _ => Paragraph::new(vec![Line::from(vec![
                 Span::styled("↑↓", Style::default().fg(Color::Yellow).bold()),
                 Span::raw(" Navigate  "),
                 Span::styled("Esc", Style::default().fg(Color::Red).bold()),
                 Span::raw(" Back to Main  "),
                 Span::styled("X", Style::default().fg(Color::Red).bold()),
-                Span::raw(" Delete entry "),
+                Span::raw(" Delete Entry "),
+                Span::styled("A", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Delete All"),
             ])]),
         }
         .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
@@ -922,6 +947,7 @@ impl App {
             InputMode::StartCountdown => self.handle_countdown_input(key_event),
             InputMode::StopTask => self.handle_stop_task_mode(key_event),
             InputMode::DeleteTask => self.handle_delete_task_mode(key_event),
+            InputMode::ConfirmDeleteAll => self.handle_confirm_delete_all_mode(key_event),
             InputMode::SelectDay => self.handle_select_day_mode(key_event),
         }
     }
@@ -1085,6 +1111,16 @@ impl App {
                         self.message = None;
                     }
                 }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    if self.tracker.entries.is_empty() {
+                        self.message = Some(format!("No tasks to Delete"));
+                        self.message_color = Color::Red;
+                    } else {
+                        self.mode = InputMode::ConfirmDeleteAll;
+                        self.input.clear();
+                        self.message = None;
+                    }
+                }
                 KeyCode::Up => {
                     if !self.tracker.entries.is_empty() {
                         let i = self.list_state.selected().unwrap_or(0);
@@ -1222,6 +1258,14 @@ impl App {
                 self.mode = InputMode::Normal;
                 self.input.clear();
             }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if !self.input.is_empty() {
+                    if let Ok(num) = self.input.parse::<usize>() {}
+                } else {
+                    self.message = Some("✗ No active tasks to stop".to_string());
+                    self.message_color = Color::Red;
+                }
+            }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 self.input.push(c);
             }
@@ -1233,6 +1277,28 @@ impl App {
                 self.input.clear();
                 self.message = Some("Cancelled".to_string());
                 self.message_color = Color::Yellow;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_confirm_delete_all_mode(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let count = self.tracker.delete_all();
+                self.message = Some(format!(
+                    "Deleted {} task{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ));
+                self.message_color = Color::Green;
+                let _ = self.tracker.save();
+                self.mode = InputMode::Normal;
+            }
+            KeyCode::Esc => {
+                self.message = Some("Cancelled".to_string());
+                self.message_color = Color::Yellow;
+                self.mode = InputMode::Normal;
             }
             _ => {}
         }
