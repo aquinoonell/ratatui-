@@ -262,7 +262,6 @@ impl TimeTracker {
 
 enum InputMode {
     Normal,
-    StartTask,
     StartCountdown,
     StopTask,
     ConfirmDeleteAll,
@@ -504,8 +503,6 @@ impl App {
         let controls = match self.mode {
             InputMode::Normal => {
                 vec![Line::from(vec![
-                    Span::styled("S", Style::default().fg(Color::Green).bold()),
-                    Span::raw(" Start Task  "),
                     Span::styled("X", Style::default().fg(Color::Red).bold()),
                     Span::raw(" Stop Task  "),
                     Span::styled("T", Style::default().fg(Color::Magenta).bold()),
@@ -532,21 +529,6 @@ impl App {
                         Span::raw(" to start "),
                         Span::styled("Esc", Style::default().fg(Color::Red).bold()),
                         Span::raw(" to cancel "),
-                    ]),
-                ]
-            }
-            InputMode::StartTask => {
-                vec![
-                    Line::from(vec![
-                        Span::raw("Task name: "),
-                        Span::styled(&self.input, Style::default().fg(Color::Yellow)),
-                        Span::styled("█", Style::default().fg(Color::Yellow)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Enter", Style::default().fg(Color::Green).bold()),
-                        Span::raw(" to confirm  "),
-                        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-                        Span::raw(" to cancel"),
                     ]),
                 ]
             }
@@ -943,7 +925,6 @@ impl App {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match self.mode {
             InputMode::Normal => self.handle_normal_mode(key_event),
-            InputMode::StartTask => self.handle_start_task_mode(key_event),
             InputMode::StartCountdown => self.handle_countdown_input(key_event),
             InputMode::StopTask => self.handle_stop_task_mode(key_event),
             InputMode::DeleteTask => self.handle_delete_task_mode(key_event),
@@ -958,11 +939,6 @@ impl App {
                 KeyCode::Char('q') | KeyCode::Char('Q') => self.exit = true,
                 KeyCode::Char('t') | KeyCode::Char('T') => {
                     self.mode = InputMode::StartCountdown;
-                    self.input.clear();
-                    self.message = None;
-                }
-                KeyCode::Char('s') | KeyCode::Char('S') => {
-                    self.mode = InputMode::StartTask;
                     self.input.clear();
                     self.message = None;
                 }
@@ -1142,40 +1118,6 @@ impl App {
         }
     }
 
-    fn handle_start_task_mode(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Enter => {
-                if !self.input.is_empty() {
-                    match self.tracker.start(&self.input) {
-                        Ok(_) => {
-                            self.message = Some(format!("✓ Started tracking: {}", self.input));
-                            self.message_color = Color::Green;
-                            let _ = self.tracker.save();
-                        }
-                        Err(e) => {
-                            self.message = Some(format!("✗ Error: {}", e));
-                            self.message_color = Color::Red;
-                        }
-                    }
-                }
-                self.mode = InputMode::Normal;
-                self.input.clear();
-            }
-            KeyCode::Char(c) => {
-                self.input.push(c);
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
-            }
-            KeyCode::Esc => {
-                self.mode = InputMode::Normal;
-                self.input.clear();
-                self.message = Some("Cancelled".to_string());
-                self.message_color = Color::Yellow;
-            }
-            _ => {}
-        }
-    }
 
     fn handle_stop_task_mode(&mut self, key_event: KeyEvent) {
         match key_event.code {
