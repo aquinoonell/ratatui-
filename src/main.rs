@@ -1001,6 +1001,9 @@ impl App {
                     self.input.clear();
                     self.message = None;
                 }
+                KeyCode::ScrollLock => {
+                    todo!()
+                }
                 KeyCode::Left => {
                     // Move to previous month
                     self.selected_day = None;
