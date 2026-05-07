@@ -1,8 +1,19 @@
-use chrono::{format, DateTime, Datelike, Duration, Local};
+use aes::Aes128;
+use aes::cipher::{KeyIvInit, StreamCipher};
+use chrono::{DateTime, Datelike, Duration, Local};
+use ctr::Ctr128BE;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpStream;
+use std::sync::mpsc::{self, Receiver, Sender};
+type Aes128Ctr = Ctr128BE<Aes128>;
 use color_eyre::Result;
-use core::num;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use ratatui::{
+    backend::CrosstermBackend,
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -12,19 +23,223 @@ use ratatui::{
         calendar::{CalendarEventStore, Monthly},
         Block, HighlightSpacing, List, ListItem, ListState, Paragraph, Widget, Wrap,
     },
-    DefaultTerminal, Frame,
+    Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
-use std::{fs, string};
-use std::{future::IntoFuture, io};
-use std::{path::PathBuf, usize};
-use time::{util::days_in_month, Date as TimeDate};
+use std::fs;
+use std::io::{self, stdout};
+use std::path::PathBuf;
+use time::Date as TimeDate;
 
+// ─────────────────────────────────────────────
+// CHAT MODULE  (AES-128-CTR encrypted relay)
+// ─────────────────────────────────────────────
+
+/// Shared 16-byte AES key (must match on both ends).
+/// In a real deployment you would do a proper key-exchange (e.g. DH/ECDH).
+/// For this course demo we use a compile-time pre-shared key.
+const CHAT_KEY: &[u8; 16] = b"SuperSecret1234!";
+/// Fixed 16-byte nonce/IV.  CTR mode is safe to reuse a nonce only when the
+/// key stream is never reused for different plaintexts.  For a classroom demo
+/// we accept this limitation; a production system would generate a random IV
+/// per message and prepend it.
+const CHAT_IV: &[u8; 16] = b"InitVector123456";
+
+/// Encrypt (or decrypt – CTR is symmetric) a UTF-8 string.
+fn aes_ctr_transform(data: &[u8]) -> Vec<u8> {
+    let mut cipher = Aes128Ctr::new(CHAT_KEY.into(), CHAT_IV.into());
+    let mut buf = data.to_vec();
+    cipher.apply_keystream(&mut buf);
+    buf
+}
+
+/// Encode bytes as lowercase hex.
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Decode a hex string back to bytes.  Returns None on invalid input.
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Encrypt a plaintext string → hex-encoded ciphertext.
+fn encrypt_msg(plaintext: &str) -> String {
+    to_hex(&aes_ctr_transform(plaintext.as_bytes()))
+}
+
+/// Decrypt a hex-encoded ciphertext → plaintext string (lossy UTF-8).
+fn decrypt_msg(hex_cipher: &str) -> String {
+    if let Some(bytes) = from_hex(hex_cipher) {
+        let plain = aes_ctr_transform(&bytes);
+        String::from_utf8_lossy(&plain).into_owned()
+    } else {
+        // Not an encrypted payload (e.g. server INFO/ERROR lines) – show as-is
+        hex_cipher.to_string()
+    }
+}
+
+// ─── Chat state ───────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+enum ChatConnectionState {
+    Disconnected,
+    Connected,
+    Registered(String), // holds our username
+}
+
+struct ChatState {
+    connection_state: ChatConnectionState,
+    /// Lines shown in the chat log (already decrypted / formatted)
+    messages: Vec<(String, Color)>,
+    /// Text the user is currently typing
+    input: String,
+    /// Channels for sending raw protocol lines to the background writer thread
+    tx: Option<Sender<String>>,
+    /// Incoming decoded lines from the background reader thread
+    rx: Option<Receiver<String>>,
+}
+
+impl ChatState {
+    fn new() -> Self {
+        ChatState {
+            connection_state: ChatConnectionState::Disconnected,
+            messages: Vec::new(),
+            input: String::new(),
+            tx: None,
+            rx: None,
+        }
+    }
+
+    fn push_msg(&mut self, text: impl Into<String>, color: Color) {
+        let mut msgs = std::mem::take(&mut self.messages);
+        msgs.push((text.into(), color));
+        // Keep the last 200 lines so memory stays bounded
+        if msgs.len() > 200 {
+            msgs.drain(0..msgs.len() - 200);
+        }
+        self.messages = msgs;
+    }
+
+    /// Try to connect to the relay server in background threads.
+    /// Returns Ok on successful TCP connect, Err with a message otherwise.
+    fn connect(&mut self, host: &str, port: u16) -> Result<(), String> {
+        let addr = format!("{}:{}", host, port);
+        let stream = TcpStream::connect(&addr)
+            .map_err(|e| format!("TCP connect failed: {}", e))?;
+
+        // Clone for writer thread
+        let stream_write = stream.try_clone()
+            .map_err(|e| format!("Stream clone failed: {}", e))?;
+
+        // Channel: app  →  writer thread
+        let (tx_send, rx_send): (Sender<String>, Receiver<String>) = mpsc::channel();
+        // Channel: reader thread  →  app
+        let (tx_recv, rx_recv): (Sender<String>, Receiver<String>) = mpsc::channel();
+
+        // ── Writer thread ──────────────────────────────────────────────────
+        std::thread::spawn(move || {
+            let mut writer = stream_write;
+            for line in rx_send {
+                let data = format!("{}\n", line);
+                if writer.write_all(data.as_bytes()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // ── Reader thread ──────────────────────────────────────────────────
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stream);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        if tx_recv.send(l).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        self.tx = Some(tx_send);
+        self.rx = Some(rx_recv);
+        self.connection_state = ChatConnectionState::Connected;
+        Ok(())
+    }
+
+    /// Send a raw protocol line to the server (no encryption wrapper).
+    fn send_raw(&self, line: &str) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(line.to_string());
+        }
+    }
+
+    /// Send an encrypted MSG command.
+    fn send_msg(&self, recipient: &str, plaintext: &str) {
+        let cipher_hex = encrypt_msg(plaintext);
+        self.send_raw(&format!("MSG {} {}", recipient, cipher_hex));
+    }
+
+    /// Drain any pending lines from the reader thread and process them.
+    fn poll_incoming(&mut self) {
+        let lines: Vec<String> = if let Some(rx) = &self.rx {
+            rx.try_iter().collect()
+        } else {
+            return;
+        };
+
+        for line in lines {
+            self.process_server_line(&line);
+        }
+    }
+
+    fn process_server_line(&mut self, line: &str) {
+        if let Some(rest) = line.strip_prefix("INFO ") {
+            // Check for registration confirmation
+            if let Some(name) = rest.strip_prefix("Registered as ") {
+                self.connection_state =
+                    ChatConnectionState::Registered(name.trim().to_string());
+            }
+            self.push_msg(format!("[server] {}", rest), Color::DarkGray);
+        } else if let Some(rest) = line.strip_prefix("ERROR ") {
+            self.push_msg(format!("[error] {}", rest), Color::Red);
+        } else if let Some(rest) = line.strip_prefix("USERLIST ") {
+            self.push_msg(format!("[online] {}", rest), Color::Cyan);
+        } else if let Some(rest) = line.strip_prefix("FROM ") {
+            // "FROM <sender> <hex_ciphertext>"
+            let mut parts = rest.splitn(2, ' ');
+            let sender = parts.next().unwrap_or("?");
+            let payload = parts.next().unwrap_or("");
+            let plaintext = decrypt_msg(payload);
+            self.push_msg(format!("{}: {}", sender, plaintext), Color::Green);
+        } else {
+            self.push_msg(line.to_string(), Color::White);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
 fn main() -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    enable_raw_mode()?;
+    let mut stdout = stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
     let app_result = App::new().run(&mut terminal);
-    ratatui::restore();
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
     app_result
 }
 
@@ -267,12 +482,14 @@ enum InputMode {
     ConfirmDeleteAll,
     DeleteTask,
     SelectDay,
+    ChatTyping,       // user is composing a chat message / command
 }
 
 enum View {
     Main,
     History,
     Calendar,
+    Chat,
 }
 
 struct App {
@@ -287,6 +504,7 @@ struct App {
     active_list_state: ListState,
     calendar_date: DateTime<Local>,
     selected_day: Option<chrono::NaiveDate>,
+    chat: ChatState,
 }
 
 impl App {
@@ -309,10 +527,11 @@ impl App {
             active_list_state,
             calendar_date: Local::now(),
             selected_day: None,
+            chat: ChatState::new(),
         }
     }
 
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+    pub fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
@@ -321,12 +540,13 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let area = frame.area();
+        let area = frame.size();
 
         match self.view {
             View::Main => self.render_main_view(area, frame.buffer_mut()),
             View::History => self.render_history_view(area, frame.buffer_mut()),
             View::Calendar => self.render_calendar_view(area, frame.buffer_mut()),
+            View::Chat => self.render_chat_view(area, frame.buffer_mut()),
         }
     }
 
@@ -504,15 +724,17 @@ impl App {
             InputMode::Normal => {
                 vec![Line::from(vec![
                     Span::styled("X", Style::default().fg(Color::Red).bold()),
-                    Span::raw(" Stop Task  "),
+                    Span::raw(" Stop  "),
                     Span::styled("T", Style::default().fg(Color::Magenta).bold()),
-                    Span::raw(" Countdown "),
+                    Span::raw(" Countdown  "),
                     Span::styled("A", Style::default().fg(Color::Red).bold()),
                     Span::raw(" Stop All  "),
                     Span::styled("C", Style::default().fg(Color::Cyan).bold()),
                     Span::raw(" Calendar  "),
                     Span::styled("H", Style::default().fg(Color::Yellow).bold()),
                     Span::raw(" History  "),
+                    Span::styled("M", Style::default().fg(Color::Blue).bold()),
+                    Span::raw(" Chat  "),
                     Span::styled("Q", Style::default().fg(Color::Gray).bold()),
                     Span::raw(" Quit "),
                 ])]
@@ -567,6 +789,16 @@ impl App {
                     Span::raw(" Confirm Delete All  "),
                     Span::styled("Esc", Style::default().fg(Color::Red).bold()),
                     Span::raw(" Cancel  "),
+                ])]
+            }
+            InputMode::ChatTyping => {
+                vec![Line::from(vec![
+                    Span::styled("I", Style::default().fg(Color::Blue).bold()),
+                    Span::raw(" type  "),
+                    Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                    Span::raw(" send  "),
+                    Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                    Span::raw(" back "),
                 ])]
             }
         };
@@ -912,6 +1144,9 @@ impl App {
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
+        // Always drain any chat messages the background reader produced
+        self.chat.poll_incoming();
+
         if event::poll(StdDuration::from_millis(100))? {
             if let Event::Key(key_event) = event::read()? {
                 if key_event.kind == KeyEventKind::Press {
@@ -930,6 +1165,7 @@ impl App {
             InputMode::DeleteTask => self.handle_delete_task_mode(key_event),
             InputMode::ConfirmDeleteAll => self.handle_confirm_delete_all_mode(key_event),
             InputMode::SelectDay => self.handle_select_day_mode(key_event),
+            InputMode::ChatTyping => self.handle_chat_typing(key_event),
         }
     }
 
@@ -985,6 +1221,10 @@ impl App {
                 }
                 KeyCode::Char('h') | KeyCode::Char('H') => {
                     self.view = View::History;
+                    self.message = None;
+                }
+                KeyCode::Char('m') | KeyCode::Char('M') => {
+                    self.view = View::Chat;
                     self.message = None;
                 }
                 _ => {}
@@ -1118,9 +1358,18 @@ impl App {
                 }
                 _ => {}
             },
+
+            View::Chat => match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.view = View::Main;
+                }
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    self.mode = InputMode::ChatTyping;
+                }
+                _ => {}
+            },
         }
     }
-
 
     fn handle_stop_task_mode(&mut self, key_event: KeyEvent) {
         match key_event.code {
@@ -1291,6 +1540,216 @@ impl App {
                 self.message_color = Color::Yellow;
             }
             _ => {}
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // CHAT VIEW
+    // ──────────────────────────────────────────────────────────────
+
+    fn render_chat_view(&mut self, area: Rect, buf: &mut Buffer) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // title
+                Constraint::Min(5),     // message log
+                Constraint::Length(3),  // input bar
+                Constraint::Length(3),  // controls hint
+            ])
+            .split(area);
+
+        // Title bar
+        let conn_label = match &self.chat.connection_state {
+            ChatConnectionState::Disconnected => " [disconnected] ".to_string(),
+            ChatConnectionState::Connected => " [connected – not registered] ".to_string(),
+            ChatConnectionState::Registered(name) => format!(" [{}] ", name),
+        };
+        let title = Paragraph::new(format!("💬 Secure Chat  {}", conn_label))
+            .centered()
+            .style(Style::default().fg(Color::Blue).bold())
+            .block(Block::bordered().border_style(Style::default().fg(Color::Blue)));
+        title.render(chunks[0], buf);
+
+        // Message log
+        let visible_height = chunks[1].height.saturating_sub(2) as usize;
+        let msgs = &self.chat.messages;
+        let start = if msgs.len() > visible_height {
+            msgs.len() - visible_height
+        } else {
+            0
+        };
+        let log_lines: Vec<Line> = msgs[start..]
+            .iter()
+            .map(|(text, color)| {
+                Line::from(Span::styled(text.clone(), Style::default().fg(*color)))
+            })
+            .collect();
+
+        let log = Paragraph::new(log_lines)
+            .block(Block::bordered().title(" Messages ").border_style(
+                Style::default().fg(Color::White),
+            ))
+            .wrap(Wrap { trim: false });
+        log.render(chunks[1], buf);
+
+        // Input bar
+        let input_content = match &self.mode {
+            InputMode::ChatTyping => {
+                Line::from(vec![
+                    Span::styled("> ", Style::default().fg(Color::Blue).bold()),
+                    Span::styled(&self.chat.input, Style::default().fg(Color::White)),
+                    Span::styled("█", Style::default().fg(Color::Blue)),
+                ])
+            }
+            _ => {
+                Line::from(vec![
+                    Span::styled(
+                        "Press I to type a command",
+                        Style::default().fg(Color::DarkGray).italic(),
+                    ),
+                ])
+            }
+        };
+        let input_block = Paragraph::new(input_content)
+            .block(Block::bordered().border_style(Style::default().fg(Color::Blue)));
+        input_block.render(chunks[2], buf);
+
+        // Controls
+        let hint = if matches!(self.mode, InputMode::ChatTyping) {
+            Line::from(vec![
+                Span::styled("Enter", Style::default().fg(Color::Green).bold()),
+                Span::raw(" Send  "),
+                Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Cancel input  "),
+                Span::styled(
+                    "  Commands: REGISTER <name>  MSG <user> <text>  LIST  QUIT",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("I", Style::default().fg(Color::Blue).bold()),
+                Span::raw(" Type  "),
+                Span::styled("Esc/Q", Style::default().fg(Color::Red).bold()),
+                Span::raw(" Back to Main  "),
+                Span::styled(
+                    "  [Messages are AES-128-CTR encrypted]",
+                    Style::default().fg(Color::DarkGray).italic(),
+                ),
+            ])
+        };
+        let controls = Paragraph::new(hint)
+            .block(Block::bordered().border_style(Style::default().fg(Color::Gray)))
+            .centered();
+        controls.render(chunks[3], buf);
+    }
+
+    fn handle_chat_typing(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.chat.input.clear();
+            }
+            KeyCode::Backspace => {
+                self.chat.input.pop();
+            }
+            KeyCode::Enter => {
+                let raw = self.chat.input.trim().to_string();
+                self.chat.input.clear();
+                self.mode = InputMode::Normal;
+                if raw.is_empty() {
+                    return;
+                }
+                self.dispatch_chat_command(&raw);
+            }
+            KeyCode::Char(c) => {
+                self.chat.input.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn dispatch_chat_command(&mut self, raw: &str) {
+        let parts: Vec<&str> = raw.splitn(3, ' ').collect();
+        let cmd = parts[0].to_uppercase();
+
+        match cmd.as_str() {
+            // ── CONNECT (not a relay protocol command, but a TUI helper) ──────
+            "CONNECT" => {
+                let host = parts.get(1).copied().unwrap_or("167.172.239.107");
+                let port: u16 = parts
+                    .get(2)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(5000);
+                match self.chat.connect(host, port) {
+                    Ok(_) => {
+                        self.chat
+                            .push_msg("[system] Connected to relay server.", Color::Yellow);
+                    }
+                    Err(e) => {
+                        self.chat.push_msg(format!("[system] {}", e), Color::Red);
+                    }
+                }
+            }
+            // ── REGISTER ──────────────────────────────────────────────────────
+            "REGISTER" => {
+                if self.chat.connection_state == ChatConnectionState::Disconnected {
+                    // Auto-connect first
+                    match self.chat.connect("167.172.239.107", 5000) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            self.chat.push_msg(format!("[system] {}", e), Color::Red);
+                            return;
+                        }
+                    }
+                }
+                self.chat.send_raw(raw);
+                self.chat
+                    .push_msg(format!("[you] {}", raw), Color::DarkGray);
+            }
+            // ── LIST ──────────────────────────────────────────────────────────
+            "LIST" => {
+                self.chat.send_raw("LIST");
+                self.chat
+                    .push_msg("[you] LIST", Color::DarkGray);
+            }
+            // ── MSG ───────────────────────────────────────────────────────────
+            "MSG" => {
+                if parts.len() < 3 {
+                    self.chat
+                        .push_msg("[error] Usage: MSG <recipient> <message>", Color::Red);
+                    return;
+                }
+                let recipient = parts[1];
+                let plaintext = parts[2];
+
+                // Show locally (already decrypted)
+                let me = match &self.chat.connection_state {
+                    ChatConnectionState::Registered(n) => n.clone(),
+                    _ => "me".to_string(),
+                };
+                self.chat
+                    .push_msg(format!("{} → {}: {}", me, recipient, plaintext), Color::Cyan);
+
+                self.chat.send_msg(recipient, plaintext);
+            }
+            // ── QUIT ─────────────────────────────────────────────────────────
+            "QUIT" => {
+                self.chat.send_raw("QUIT");
+                self.chat
+                    .push_msg("[system] Disconnected.", Color::Yellow);
+                self.chat.connection_state = ChatConnectionState::Disconnected;
+                self.chat.tx = None;
+                self.chat.rx = None;
+            }
+            _ => {
+                self.chat
+                    .push_msg(format!("[error] Unknown command: {}", raw), Color::Red);
+                self.chat.push_msg(
+                    "[help] Commands: REGISTER <name>  MSG <user> <text>  LIST  QUIT",
+                    Color::DarkGray,
+                );
+            }
         }
     }
 }
