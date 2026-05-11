@@ -1564,7 +1564,7 @@ impl App {
             ChatConnectionState::Connected => " [connected – not registered] ".to_string(),
             ChatConnectionState::Registered(name) => format!(" [{}] ", name),
         };
-        let title = Paragraph::new(format!("💬 Secure Chat  {}", conn_label))
+        let title = Paragraph::new(format!("Secure Chat  {}", conn_label))
             .centered()
             .style(Style::default().fg(Color::Blue).bold())
             .block(Block::bordered().border_style(Style::default().fg(Color::Blue)));
