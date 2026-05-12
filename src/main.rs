@@ -1,11 +1,16 @@
-use aes::Aes128;
-use aes::cipher::{KeyIvInit, StreamCipher};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::{DateTime, Datelike, Duration, Local};
-use ctr::Ctr128BE;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
-type Aes128Ctr = Ctr128BE<Aes128>;
+
+mod crypto;
+use crypto::{Handshake, Identity, KnownUsers, SessionKeys};
+
+/// Default relay server — point this at your own VM
+const RELAY_HOST: &str = "192.168.1.158";
+const RELAY_PORT: u16 = 5000;
+
 use color_eyre::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -32,67 +37,39 @@ use std::io::{self, stdout};
 use std::path::PathBuf;
 use time::Date as TimeDate;
 
-// ─────────────────────────────────────────────
-// CHAT MODULE  (AES-128-CTR encrypted relay)
-// ─────────────────────────────────────────────
-
-/// Shared 16-byte AES key (must match on both ends).
-/// In a real deployment you would do a proper key-exchange (e.g. DH/ECDH).
-/// For this course demo we use a compile-time pre-shared key.
-const CHAT_KEY: &[u8; 16] = b"SuperSecret1234!";
-/// Fixed 16-byte nonce/IV.  CTR mode is safe to reuse a nonce only when the
-/// key stream is never reused for different plaintexts.  For a classroom demo
-/// we accept this limitation; a production system would generate a random IV
-/// per message and prepend it.
-const CHAT_IV: &[u8; 16] = b"InitVector123456";
-
-/// Encrypt (or decrypt – CTR is symmetric) a UTF-8 string.
-fn aes_ctr_transform(data: &[u8]) -> Vec<u8> {
-    let mut cipher = Aes128Ctr::new(CHAT_KEY.into(), CHAT_IV.into());
-    let mut buf = data.to_vec();
-    cipher.apply_keystream(&mut buf);
-    buf
-}
-
-/// Encode bytes as lowercase hex.
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Decode a hex string back to bytes.  Returns None on invalid input.
-fn from_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
-}
-
-/// Encrypt a plaintext string → hex-encoded ciphertext.
-fn encrypt_msg(plaintext: &str) -> String {
-    to_hex(&aes_ctr_transform(plaintext.as_bytes()))
-}
-
-/// Decrypt a hex-encoded ciphertext → plaintext string (lossy UTF-8).
-fn decrypt_msg(hex_cipher: &str) -> String {
-    if let Some(bytes) = from_hex(hex_cipher) {
-        let plain = aes_ctr_transform(&bytes);
-        String::from_utf8_lossy(&plain).into_owned()
-    } else {
-        // Not an encrypted payload (e.g. server INFO/ERROR lines) – show as-is
-        hex_cipher.to_string()
-    }
-}
-
-// ─── Chat state ───────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT MODULE  — End-to-end encrypted relay chat
+//
+// Protocol phases:
+//   1. REGISTER  → relay learns username; client sends its Ed25519 public key
+//   2. SECURE    → initiates X25519 ECDH handshake with peer via HELLO messages
+//   3. MSG       → ChaCha20-Poly1305 AEAD + per-message symmetric ratchet
+//
+// The relay server sees only:
+//   REGISTER, LIST, QUIT commands (plaintext metadata)
+//   MSG <recipient> <base64_ciphertext>  (never plaintext content)
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 enum ChatConnectionState {
     Disconnected,
     Connected,
     Registered(String), // holds our username
+}
+
+/// State of the secure session with the current peer.
+enum SecureSessionState {
+    /// No secure session — messages sent as INSECURE plain warning
+    None,
+    /// We sent our HELLO, waiting for peer's HELLO
+    AwaitingHello {
+        handshake: Handshake,
+        peer_username: String,
+        /// Peer's Ed25519 public key (base64) — retrieved before handshake
+        peer_pubkey_b64: String,
+    },
+    /// Both HELLOs exchanged — session keys derived
+    Established(SessionKeys),
 }
 
 struct ChatState {
@@ -105,6 +82,12 @@ struct ChatState {
     tx: Option<Sender<String>>,
     /// Incoming decoded lines from the background reader thread
     rx: Option<Receiver<String>>,
+    /// Our loaded Ed25519 identity (loaded on REGISTER)
+    identity: Option<Identity>,
+    /// TOFU store of known peer public keys
+    known_users: KnownUsers,
+    /// Current secure session state
+    session: SecureSessionState,
 }
 
 impl ChatState {
@@ -115,36 +98,39 @@ impl ChatState {
             input: String::new(),
             tx: None,
             rx: None,
+            identity: None,
+            known_users: KnownUsers::load(),
+            session: SecureSessionState::None,
         }
     }
 
     fn push_msg(&mut self, text: impl Into<String>, color: Color) {
         let mut msgs = std::mem::take(&mut self.messages);
         msgs.push((text.into(), color));
-        // Keep the last 200 lines so memory stays bounded
         if msgs.len() > 200 {
             msgs.drain(0..msgs.len() - 200);
         }
         self.messages = msgs;
     }
 
-    /// Try to connect to the relay server in background threads.
-    /// Returns Ok on successful TCP connect, Err with a message otherwise.
+    fn my_username(&self) -> String {
+        match &self.connection_state {
+            ChatConnectionState::Registered(n) => n.clone(),
+            _ => "me".to_string(),
+        }
+    }
+
+    /// TCP connect + spawn reader/writer threads.
     fn connect(&mut self, host: &str, port: u16) -> Result<(), String> {
         let addr = format!("{}:{}", host, port);
         let stream = TcpStream::connect(&addr)
             .map_err(|e| format!("TCP connect failed: {}", e))?;
-
-        // Clone for writer thread
         let stream_write = stream.try_clone()
             .map_err(|e| format!("Stream clone failed: {}", e))?;
 
-        // Channel: app  →  writer thread
         let (tx_send, rx_send): (Sender<String>, Receiver<String>) = mpsc::channel();
-        // Channel: reader thread  →  app
         let (tx_recv, rx_recv): (Sender<String>, Receiver<String>) = mpsc::channel();
 
-        // ── Writer thread ──────────────────────────────────────────────────
         std::thread::spawn(move || {
             let mut writer = stream_write;
             for line in rx_send {
@@ -155,16 +141,11 @@ impl ChatState {
             }
         });
 
-        // ── Reader thread ──────────────────────────────────────────────────
         std::thread::spawn(move || {
             let reader = BufReader::new(stream);
             for line in reader.lines() {
                 match line {
-                    Ok(l) => {
-                        if tx_recv.send(l).is_err() {
-                            break;
-                        }
-                    }
+                    Ok(l) => { if tx_recv.send(l).is_err() { break; } }
                     Err(_) => break,
                 }
             }
@@ -176,53 +157,209 @@ impl ChatState {
         Ok(())
     }
 
-    /// Send a raw protocol line to the server (no encryption wrapper).
     fn send_raw(&self, line: &str) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(line.to_string());
         }
     }
 
-    /// Send an encrypted MSG command.
-    fn send_msg(&self, recipient: &str, plaintext: &str) {
-        let cipher_hex = encrypt_msg(plaintext);
-        self.send_raw(&format!("MSG {} {}", recipient, cipher_hex));
-    }
-
-    /// Drain any pending lines from the reader thread and process them.
+    /// Drain incoming lines from reader thread and process them.
     fn poll_incoming(&mut self) {
         let lines: Vec<String> = if let Some(rx) = &self.rx {
             rx.try_iter().collect()
         } else {
             return;
         };
-
         for line in lines {
             self.process_server_line(&line);
         }
     }
 
     fn process_server_line(&mut self, line: &str) {
+        // ── Server control messages ────────────────────────────────────────
         if let Some(rest) = line.strip_prefix("INFO ") {
-            // Check for registration confirmation
             if let Some(name) = rest.strip_prefix("Registered as ") {
                 self.connection_state =
                     ChatConnectionState::Registered(name.trim().to_string());
             }
             self.push_msg(format!("[server] {}", rest), Color::DarkGray);
-        } else if let Some(rest) = line.strip_prefix("ERROR ") {
+            return;
+        }
+        if let Some(rest) = line.strip_prefix("ERROR ") {
             self.push_msg(format!("[error] {}", rest), Color::Red);
-        } else if let Some(rest) = line.strip_prefix("USERLIST ") {
+            return;
+        }
+        if let Some(rest) = line.strip_prefix("USERLIST ") {
             self.push_msg(format!("[online] {}", rest), Color::Cyan);
-        } else if let Some(rest) = line.strip_prefix("FROM ") {
-            // "FROM <sender> <hex_ciphertext>"
-            let mut parts = rest.splitn(2, ' ');
-            let sender = parts.next().unwrap_or("?");
-            let payload = parts.next().unwrap_or("");
-            let plaintext = decrypt_msg(payload);
-            self.push_msg(format!("{}: {}", sender, plaintext), Color::Green);
+            return;
+        }
+
+        // ── Messages routed by relay: FROM <sender> <payload> ─────────────
+        if let Some(rest) = line.strip_prefix("FROM ") {
+            let mut parts = rest.splitn(3, ' ');
+            let sender    = parts.next().unwrap_or("?").to_string();
+            let msg_type  = parts.next().unwrap_or("").to_string();
+            let payload   = parts.next().unwrap_or("").to_string();
+
+            match msg_type.as_str() {
+                // ── PUBKEY response: peer is announcing their identity key ──
+                "PUBKEY" => {
+                    self.handle_incoming_pubkey(&sender, &payload);
+                }
+                // ── HELLO: peer's ephemeral key + signature ────────────────
+                "HELLO" => {
+                    self.handle_incoming_hello(&sender, &payload);
+                }
+                // ── Encrypted message payload ──────────────────────────────
+                "ENC" => {
+                    self.handle_incoming_enc(&sender, &payload);
+                }
+                // ── Anything else: show raw (covers plain text from old clients) ─
+                _ => {
+                    self.push_msg(
+                        format!("[plain/{}] {}: {} {}", msg_type, sender, msg_type, payload),
+                        Color::Yellow,
+                    );
+                }
+            }
+            return;
+        }
+
+        // Fallback
+        self.push_msg(line.to_string(), Color::White);
+    }
+
+    /// Peer sent us their Ed25519 public key. Run TOFU check, then if we were
+    /// waiting for it, kick off the HELLO handshake.
+    fn handle_incoming_pubkey(&mut self, sender: &str, pubkey_b64: &str) {
+        match self.known_users.check_and_update(sender, pubkey_b64) {
+            Ok(true) => {
+                self.push_msg(
+                    format!("🔑 First contact with {} — key trusted and stored.", sender),
+                    Color::Yellow,
+                );
+            }
+            Ok(false) => {
+                self.push_msg(
+                    format!("🔑 {} identity key verified (matches stored).", sender),
+                    Color::Green,
+                );
+            }
+            Err(warning) => {
+                self.push_msg(warning, Color::Red);
+                // Do NOT proceed — reset any pending session
+                self.session = SecureSessionState::None;
+                return;
+            }
+        }
+
+        // If we are in AwaitingHello and this pubkey is for our pending peer,
+        // fill it in now so the HELLO we sent can be completed on their reply.
+        if let SecureSessionState::AwaitingHello { peer_pubkey_b64, peer_username, .. } =
+            &mut self.session
+        {
+            if peer_username == sender && peer_pubkey_b64.is_empty() {
+                *peer_pubkey_b64 = pubkey_b64.to_string();
+            }
+        }
+    }
+
+    /// Peer sent us their HELLO (eph pub + Ed25519 signature).
+    /// payload = "<eph_pub_b64> <sig_b64>"
+    fn handle_incoming_hello(&mut self, sender: &str, payload: &str) {
+        let mut p = payload.splitn(2, ' ');
+        let peer_eph_b64 = p.next().unwrap_or("").to_string();
+        let peer_sig_b64 = p.next().unwrap_or("").to_string();
+
+        // We might be the responder (no pending AwaitingHello) or the initiator.
+        let (my_handshake, peer_pubkey_b64, i_am_initiator) =
+            match std::mem::replace(&mut self.session, SecureSessionState::None) {
+                // We are the initiator — we already sent HELLO, now receiving theirs
+                SecureSessionState::AwaitingHello {
+                    handshake,
+                    peer_username,
+                    peer_pubkey_b64,
+                } if peer_username == sender => {
+                    (handshake, peer_pubkey_b64, true)
+                }
+                // We are the responder — we got HELLO first, now we send ours
+                _ => {
+                    // Look up peer pubkey from TOFU store
+                    let stored_key = self.known_users
+                        .check_and_update(sender, "")
+                        .err()
+                        .unwrap_or_default();
+                    // Actually we need to read it from the map — do a fresh load
+                    let ku = KnownUsers::load();
+                    let peer_pub = match ku.users().get(sender) {
+                        Some(k) => k.clone(),
+                        None => {
+                            self.push_msg(
+                                format!("[error] Got HELLO from {} but no public key stored — send SECURE {} first", sender, sender),
+                                Color::Red,
+                            );
+                            return;
+                        }
+                    };
+                    let new_hs = Handshake::new();
+                    // Send our HELLO back
+                    if let Some(id) = &self.identity {
+                        let hello = new_hs.hello_line(id);
+                        // Wire format: MSG <sender> HELLO <eph_pub_b64> <sig_b64>
+                        let hello_parts: Vec<&str> = hello.splitn(4, ' ').collect();
+                        if hello_parts.len() == 4 {
+                            self.send_raw(&format!(
+                                "MSG {} HELLO {} {}",
+                                sender, hello_parts[2], hello_parts[3]
+                            ));
+                        }
+                    }
+                    (new_hs, peer_pub, false)
+                }
+            };
+
+        // Derive session keys
+        let my_username = self.my_username();
+        match my_handshake.derive_session(
+            &my_username,
+            &peer_pubkey_b64,
+            &peer_eph_b64,
+            &peer_sig_b64,
+            i_am_initiator,
+        ) {
+            Ok(session_keys) => {
+                self.push_msg(
+                    format!(
+                        "🔒 Secure session established with {} (ChaCha20-Poly1305 + ratchet)",
+                        sender
+                    ),
+                    Color::Green,
+                );
+                self.session = SecureSessionState::Established(session_keys);
+            }
+            Err(e) => {
+                self.push_msg(format!("[handshake error] {}", e), Color::Red);
+                self.session = SecureSessionState::None;
+            }
+        }
+    }
+
+    /// Decrypt an incoming ENC message using the ratchet.
+    fn handle_incoming_enc(&mut self, sender: &str, wire_b64: &str) {
+        if let SecureSessionState::Established(ref mut keys) = self.session {
+            match keys.decrypt(wire_b64) {
+                Ok(plaintext) => {
+                    self.push_msg(format!("🔒 {}: {}", sender, plaintext), Color::Green);
+                }
+                Err(e) => {
+                    self.push_msg(format!("[decrypt error] {}", e), Color::Red);
+                }
+            }
         } else {
-            self.push_msg(line.to_string(), Color::White);
+            self.push_msg(
+                format!("[error] Got encrypted message from {} but no secure session active — run SECURE {} first", sender, sender),
+                Color::Red,
+            );
         }
     }
 }
@@ -1564,7 +1701,7 @@ impl App {
             ChatConnectionState::Connected => " [connected – not registered] ".to_string(),
             ChatConnectionState::Registered(name) => format!(" [{}] ", name),
         };
-        let title = Paragraph::new(format!("Secure Chat  {}", conn_label))
+        let title = Paragraph::new(format!("💬 Secure Chat  {}", conn_label))
             .centered()
             .style(Style::default().fg(Color::Blue).bold())
             .block(Block::bordered().border_style(Style::default().fg(Color::Blue)));
@@ -1622,7 +1759,7 @@ impl App {
                 Span::styled("Esc", Style::default().fg(Color::Red).bold()),
                 Span::raw(" Cancel input  "),
                 Span::styled(
-                    "  Commands: REGISTER <name>  MSG <user> <text>  LIST  QUIT",
+                    "  Commands: REGISTER <name>  PUBKEY <peer>  SECURE <peer>  MSG <peer> <text>  LIST  QUIT",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
@@ -1633,7 +1770,7 @@ impl App {
                 Span::styled("Esc/Q", Style::default().fg(Color::Red).bold()),
                 Span::raw(" Back to Main  "),
                 Span::styled(
-                    "  [Messages are AES-128-CTR encrypted]",
+                    "  [ChaCha20-Poly1305 + X25519 + Ed25519 + Ratchet]",
                     Style::default().fg(Color::DarkGray).italic(),
                 ),
             ])
@@ -1674,28 +1811,50 @@ impl App {
         let cmd = parts[0].to_uppercase();
 
         match cmd.as_str() {
-            // ── CONNECT (not a relay protocol command, but a TUI helper) ──────
+            // ── CONNECT ───────────────────────────────────────────────────────
             "CONNECT" => {
-                let host = parts.get(1).copied().unwrap_or("167.172.239.107");
+                let host = parts.get(1).copied().unwrap_or(RELAY_HOST);
                 let port: u16 = parts
                     .get(2)
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(5000);
+                    .unwrap_or(RELAY_PORT);
                 match self.chat.connect(host, port) {
-                    Ok(_) => {
-                        self.chat
-                            .push_msg("[system] Connected to relay server.", Color::Yellow);
-                    }
-                    Err(e) => {
-                        self.chat.push_msg(format!("[system] {}", e), Color::Red);
-                    }
+                    Ok(_) => self.chat.push_msg("[system] Connected to relay server.", Color::Yellow),
+                    Err(e) => self.chat.push_msg(format!("[system] {}", e), Color::Red),
                 }
             }
+
             // ── REGISTER ──────────────────────────────────────────────────────
+            // Loads/generates Ed25519 identity, connects, registers with relay,
+            // then broadcasts our public key so peers can store it for TOFU.
             "REGISTER" => {
+                let username = match parts.get(1).copied() {
+                    Some(u) => u.to_string(),
+                    None => {
+                        self.chat.push_msg("[error] Usage: REGISTER <username>", Color::Red);
+                        return;
+                    }
+                };
+
+                // Load or generate identity keypair
+                match Identity::load_or_create(&username) {
+                    Ok(identity) => {
+                        let pubkey = identity.public_key_b64();
+                        self.chat.push_msg(
+                            format!("🔑 Identity key loaded. Fingerprint: {}…", &pubkey[..16]),
+                            Color::Yellow,
+                        );
+                        self.chat.identity = Some(identity);
+                    }
+                    Err(e) => {
+                        self.chat.push_msg(format!("[error] Key load failed: {}", e), Color::Red);
+                        return;
+                    }
+                }
+
+                // Auto-connect if needed
                 if self.chat.connection_state == ChatConnectionState::Disconnected {
-                    // Auto-connect first
-                    match self.chat.connect("167.172.239.107", 5000) {
+                    match self.chat.connect(RELAY_HOST, RELAY_PORT) {
                         Ok(_) => {}
                         Err(e) => {
                             self.chat.push_msg(format!("[system] {}", e), Color::Red);
@@ -1703,50 +1862,163 @@ impl App {
                         }
                     }
                 }
-                self.chat.send_raw(raw);
-                self.chat
-                    .push_msg(format!("[you] {}", raw), Color::DarkGray);
+
+                // Register username with relay
+                self.chat.send_raw(&format!("REGISTER {}", username));
+
+                // Broadcast our public key to all peers so they can TOFU-store it.
+                // We route it as a normal MSG to "*" which the relay will reject
+                // (unknown user) but that's fine — we really send it after listing.
+                // Instead: store in the server by sending to each connected user.
+                // For simplicity we broadcast by sending PUBKEY as an INFO-style
+                // MSG that peers will pick up on their FROM handler.
+                if let Some(id) = &self.chat.identity {
+                    let pubkey = id.public_key_b64();
+                    // We'll broadcast after registration via the PUBKEY command
+                    self.chat.push_msg(
+                        format!("[system] Registered. Share your fingerprint: {}…", &pubkey[..24]),
+                        Color::DarkGray,
+                    );
+                }
             }
+
+            // ── PUBKEY — broadcast our public key to a specific peer ──────────
+            "PUBKEY" => {
+                let target = match parts.get(1).copied() {
+                    Some(t) => t,
+                    None => {
+                        self.chat.push_msg("[error] Usage: PUBKEY <username>", Color::Red);
+                        return;
+                    }
+                };
+                if let Some(id) = &self.chat.identity {
+                    let pubkey = id.public_key_b64();
+                    self.chat.send_raw(&format!("MSG {} PUBKEY {}", target, pubkey));
+                    self.chat.push_msg(
+                        format!("[system] Public key sent to {}.", target),
+                        Color::DarkGray,
+                    );
+                } else {
+                    self.chat.push_msg("[error] Not registered yet.", Color::Red);
+                }
+            }
+
+            // ── SECURE — initiate authenticated key exchange with a peer ──────
+            "SECURE" => {
+                let peer = match parts.get(1).copied() {
+                    Some(p) => p.to_string(),
+                    None => {
+                        self.chat.push_msg("[error] Usage: SECURE <username>", Color::Red);
+                        return;
+                    }
+                };
+
+                let identity = match &self.chat.identity {
+                    Some(id) => id,
+                    None => {
+                        self.chat.push_msg("[error] REGISTER first.", Color::Red);
+                        return;
+                    }
+                };
+
+                // Look up peer's stored public key (TOFU store)
+                let ku = KnownUsers::load();
+                let peer_pubkey_b64 = match ku.users().get(&peer) {
+                    Some(k) => k.clone(),
+                    None => {
+                        self.chat.push_msg(
+                            format!(
+                                "[error] No public key stored for {}. Ask them to run: PUBKEY {}",
+                                peer, self.chat.my_username()
+                            ),
+                            Color::Red,
+                        );
+                        return;
+                    }
+                };
+
+                // Generate our ephemeral X25519 keypair and sign it
+                let handshake = Handshake::new();
+                let hello = handshake.hello_line(identity);
+                // hello = "HELLO <username> <eph_pub_b64> <sig_b64>"
+                let hello_parts: Vec<&str> = hello.splitn(4, ' ').collect();
+                if hello_parts.len() == 4 {
+                    self.chat.send_raw(&format!(
+                        "MSG {} HELLO {} {}",
+                        peer, hello_parts[2], hello_parts[3]
+                    ));
+                }
+
+                self.chat.push_msg(
+                    format!("[handshake] Sent HELLO to {}. Awaiting their response…", peer),
+                    Color::Yellow,
+                );
+                self.chat.session = SecureSessionState::AwaitingHello {
+                    handshake,
+                    peer_username: peer.clone(),
+                    peer_pubkey_b64,
+                };
+            }
+
             // ── LIST ──────────────────────────────────────────────────────────
             "LIST" => {
                 self.chat.send_raw("LIST");
-                self.chat
-                    .push_msg("[you] LIST", Color::DarkGray);
+                self.chat.push_msg("[you] LIST", Color::DarkGray);
             }
-            // ── MSG ───────────────────────────────────────────────────────────
+
+            // ── MSG — send encrypted message (requires SECURE session) ────────
             "MSG" => {
                 if parts.len() < 3 {
-                    self.chat
-                        .push_msg("[error] Usage: MSG <recipient> <message>", Color::Red);
+                    self.chat.push_msg("[error] Usage: MSG <recipient> <message>", Color::Red);
                     return;
                 }
-                let recipient = parts[1];
+                let recipient = parts[1].to_string();
                 let plaintext = parts[2];
 
-                // Show locally (already decrypted)
-                let me = match &self.chat.connection_state {
-                    ChatConnectionState::Registered(n) => n.clone(),
-                    _ => "me".to_string(),
-                };
-                self.chat
-                    .push_msg(format!("{} → {}: {}", me, recipient, plaintext), Color::Cyan);
-
-                self.chat.send_msg(recipient, plaintext);
+                match &mut self.chat.session {
+                    SecureSessionState::Established(ref mut keys)
+                        if keys.peer_username == recipient =>
+                    {
+                        match keys.encrypt(plaintext) {
+                            Ok(wire) => {
+                                self.chat.send_raw(&format!("MSG {} ENC {}", recipient, wire));
+                                let me = self.chat.my_username();
+                                self.chat.push_msg(
+                                    format!("🔒 {} → {}: {}", me, recipient, plaintext),
+                                    Color::Cyan,
+                                );
+                            }
+                            Err(e) => {
+                                self.chat.push_msg(format!("[encrypt error] {}", e), Color::Red);
+                            }
+                        }
+                    }
+                    _ => {
+                        self.chat.push_msg(
+                            format!(
+                                "[error] No secure session with {}. Run: SECURE {}",
+                                recipient, recipient
+                            ),
+                            Color::Red,
+                        );
+                    }
+                }
             }
+
             // ── QUIT ─────────────────────────────────────────────────────────
             "QUIT" => {
                 self.chat.send_raw("QUIT");
-                self.chat
-                    .push_msg("[system] Disconnected.", Color::Yellow);
+                self.chat.push_msg("[system] Disconnected.", Color::Yellow);
                 self.chat.connection_state = ChatConnectionState::Disconnected;
+                self.chat.session = SecureSessionState::None;
                 self.chat.tx = None;
                 self.chat.rx = None;
             }
+
             _ => {
-                self.chat
-                    .push_msg(format!("[error] Unknown command: {}", raw), Color::Red);
+                self.chat.push_msg(format!("[error] Unknown command: {}", raw), Color::Red);
                 self.chat.push_msg(
-                    "[help] Commands: REGISTER <name>  MSG <user> <text>  LIST  QUIT",
+                    "[help] REGISTER <name>  PUBKEY <peer>  SECURE <peer>  MSG <peer> <text>  LIST  QUIT",
                     Color::DarkGray,
                 );
             }
