@@ -1,4 +1,3 @@
-
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng as AeadOsRng},
@@ -159,8 +158,8 @@ impl KnownUsers {
                  Received:{}\n\
                  Possible MITM — aborting handshake.",
                 username,
-                &stored[..16],
-                &pubkey_b64[..16]
+                &stored[..stored.len().min(16)],
+                &pubkey_b64[..pubkey_b64.len().min(16)]
             )),
         }
     }
@@ -200,7 +199,7 @@ impl Handshake {
     /// their send key = the other side's recv key.
     pub fn derive_session(
         mut self,
-        my_username: &str,
+        peer_username: &str,      // peer's username — stored in SessionKeys for session lookup
         peer_pubkey_b64: &str,    // peer's Ed25519 verifying key (base64)
         peer_eph_pub_b64: &str,   // peer's X25519 ephemeral public (base64)
         peer_sig_b64: &str,       // peer's signature over "HELLO" || peer_eph_pub
@@ -251,7 +250,7 @@ impl Handshake {
             (key_b.to_vec(), key_a.to_vec())
         };
 
-        Ok(SessionKeys::new(my_username.to_string(), send_chain, recv_chain))
+        Ok(SessionKeys::new(peer_username.to_string(), send_chain, recv_chain))
     }
 }
 
