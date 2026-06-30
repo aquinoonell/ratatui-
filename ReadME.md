@@ -25,13 +25,46 @@ cargo build --release
 
 **2. Start the relay server**
 
-The relay can run on any machine reachable by both clients. It just routes messages and cannot read any content.
+The relay can run on any machine reachable by both clients. It just routes encrypted messages and cannot read any content.
 
 ```bash
 python3 relay_server.py
 ```
 
-It listens on port 5000 by default.
+It listens on `0.0.0.0:5000` by default. Requires Python 3 only — no external dependencies (uses `socket`, `threading`, `datetime` from the standard library).
+
+On startup you should see:
+
+```
+[HH:MM:SS] Relay server starting on 0.0.0.0:5000
+[HH:MM:SS] NOTE: This relay routes encrypted traffic only.
+[HH:MM:SS]       ENC payloads are ciphertext -- relay cannot read message content.
+[HH:MM:SS] ------------------------------------------------------------
+[HH:MM:SS] Listening for connections...
+```
+
+If port 5000 is already in use (e.g. restarting after a crash), free it first:
+
+```bash
+fuser -k 5000/tcp; python3 relay_server.py
+```
+
+> `fuser` may not be installed by default on minimal Linux systems
+> (Debian/Ubuntu: `apt install psmisc`). On macOS, use
+> `lsof -ti:5000 | xargs kill -9` instead, since `fuser` isn't available there.
+
+To stop the relay, either `Ctrl+C` the foreground process, or from another terminal:
+
+```bash
+fuser -k 5000/tcp
+```
+
+Or find and kill it manually:
+
+```bash
+ps aux | grep relay_server.py
+kill <PID>
+```
 
 **3. Set the relay address**
 
