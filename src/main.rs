@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use chrono::{DateTime, Datelike, Duration, Local, format};
+use chrono::{format, DateTime, Datelike, Duration, Local};
+use serde_json::to_string;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,10 +32,10 @@ use ratatui::{
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration as StdDuration;
 use std::fs;
 use std::io::{self, stdout};
 use std::path::PathBuf;
+use std::time::Duration as StdDuration;
 use time::Date as TimeDate;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,9 +133,9 @@ impl ChatState {
     /// TCP connect + spawn reader/writer threads.
     fn connect(&mut self, host: &str, port: u16) -> Result<(), String> {
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr)
-            .map_err(|e| format!("TCP connect failed: {}", e))?;
-        let stream_write = stream.try_clone()
+        let stream = TcpStream::connect(&addr).map_err(|e| format!("TCP connect failed: {}", e))?;
+        let stream_write = stream
+            .try_clone()
             .map_err(|e| format!("Stream clone failed: {}", e))?;
 
         let (tx_send, rx_send): (Sender<String>, Receiver<String>) = mpsc::channel();
@@ -154,7 +155,11 @@ impl ChatState {
             let reader = BufReader::new(stream);
             for line in reader.lines() {
                 match line {
-                    Ok(l) => { if tx_recv.send(l).is_err() { break; } }
+                    Ok(l) => {
+                        if tx_recv.send(l).is_err() {
+                            break;
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -188,8 +193,7 @@ impl ChatState {
         // ── Server control messages ────────────────────────────────────────
         if let Some(rest) = line.strip_prefix("INFO ") {
             if let Some(name) = rest.strip_prefix("Registered as ") {
-                self.connection_state =
-                    ChatConnectionState::Registered(name.trim().to_string());
+                self.connection_state = ChatConnectionState::Registered(name.trim().to_string());
             }
             self.push_msg(format!("[server] {}", rest), Color::DarkGray);
             return;
@@ -198,17 +202,30 @@ impl ChatState {
             self.push_msg(format!("[error] {}", rest), Color::Red);
             return;
         }
-        if let Some(rest) = line.strip_prefix("USERLIST ") {
-            self.push_msg(format!("[online] {}", rest), Color::Cyan);
-            return;
+        if let Some(rest) = line.strip_prefix("USERLIST") {
+                let my_name = self.my_username();
+                let (mine, others): (Vec<&str>, Vec<&str>) =
+                    rest.split_whitespace().partition(|&name| name == my_name);
+
+                if !mine.is_empty() {
+                    self.push_msg(format!("[you] => {}", mine.join(" ")), Color::Cyan);
+                }
+
+                let others_str = if others.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    others.join(" ")
+                };
+                self.push_msg(format!("[online] => {}", others_str), Color::Cyan);
+
         }
 
         // ── Messages routed by relay: FROM <sender> <payload> ─────────────
         if let Some(rest) = line.strip_prefix("FROM ") {
             let mut parts = rest.splitn(3, ' ');
-            let sender    = parts.next().unwrap_or("?").to_string();
-            let msg_type  = parts.next().unwrap_or("").to_string();
-            let payload   = parts.next().unwrap_or("").to_string();
+            let sender = parts.next().unwrap_or("?").to_string();
+            let msg_type = parts.next().unwrap_or("").to_string();
+            let payload = parts.next().unwrap_or("").to_string();
 
             match msg_type.as_str() {
                 // ── PUBKEY response: peer is announcing their identity key ──
@@ -244,7 +261,10 @@ impl ChatState {
         match self.known_users.check_and_update(sender, pubkey_b64) {
             Ok(true) => {
                 self.push_msg(
-                    format!("First contact with {} - key trusted and stored (TOFU).", sender),
+                    format!(
+                        "First contact with {} - key trusted and stored (TOFU).",
+                        sender
+                    ),
                     Color::Yellow,
                 );
             }
@@ -264,13 +284,19 @@ impl ChatState {
 
         // If we are in AwaitingHello and the peer_pubkey_b64 was empty
         // (we didn't have their key before SECURE), fill it in now.
-        if let SecureSessionState::AwaitingHello { peer_pubkey_b64, peer_username, .. } =
-            &mut self.session
+        if let SecureSessionState::AwaitingHello {
+            peer_pubkey_b64,
+            peer_username,
+            ..
+        } = &mut self.session
         {
             if peer_username == sender && peer_pubkey_b64.is_empty() {
                 *peer_pubkey_b64 = pubkey_b64.to_string();
                 self.push_msg(
-                    format!("[handshake] Received {}'s public key. Awaiting their HELLO...", sender),
+                    format!(
+                        "[handshake] Received {}'s public key. Awaiting their HELLO...",
+                        sender
+                    ),
                     Color::DarkGray,
                 );
             }
@@ -285,66 +311,68 @@ impl ChatState {
         let peer_sig_b64 = p.next().unwrap_or("").to_string();
 
         // We might be the responder (no pending AwaitingHello) or the initiator.
-        let (my_handshake, peer_pubkey_b64, i_am_initiator) =
-            match std::mem::replace(&mut self.session, SecureSessionState::None) {
-                // We are the initiator - we already sent our HELLO, now receiving theirs
-                SecureSessionState::AwaitingHello {
-                    handshake,
-                    peer_username,
-                    peer_pubkey_b64,
-                } if peer_username == sender => {
-                    if peer_pubkey_b64.is_empty() {
-                        // We don't have their key yet - this is a race condition.
-                        // Store the HELLO payload temporarily and wait for PUBKEY.
-                        // For simplicity: re-queue and show an error.
-                        self.push_msg(
+        let (my_handshake, peer_pubkey_b64, i_am_initiator) = match std::mem::replace(
+            &mut self.session,
+            SecureSessionState::None,
+        ) {
+            // We are the initiator - we already sent our HELLO, now receiving theirs
+            SecureSessionState::AwaitingHello {
+                handshake,
+                peer_username,
+                peer_pubkey_b64,
+            } if peer_username == sender => {
+                if peer_pubkey_b64.is_empty() {
+                    // We don't have their key yet - this is a race condition.
+                    // Store the HELLO payload temporarily and wait for PUBKEY.
+                    // For simplicity: re-queue and show an error.
+                    self.push_msg(
                             format!("[handshake] Received HELLO from {} before their PUBKEY - re-run SECURE.", sender),
                             Color::Red,
                         );
-                        self.session = SecureSessionState::AwaitingHello {
-                            handshake,
-                            peer_username,
-                            peer_pubkey_b64,
-                        };
-                        return;
-                    }
-                    (handshake, peer_pubkey_b64, true)
+                    self.session = SecureSessionState::AwaitingHello {
+                        handshake,
+                        peer_username,
+                        peer_pubkey_b64,
+                    };
+                    return;
                 }
-                // We are the responder - received HELLO first, respond with PUBKEY + HELLO
-                _ => {
-                    let peer_pub = match self.known_users.users().get(sender) {
-                        Some(k) => k.clone(),
-                        None => {
-                            // We don't know their key yet but they sent HELLO.
-                            // They should have sent PUBKEY first - ask them.
-                            self.push_msg(
+                (handshake, peer_pubkey_b64, true)
+            }
+            // We are the responder - received HELLO first, respond with PUBKEY + HELLO
+            _ => {
+                let peer_pub = match self.known_users.users().get(sender) {
+                    Some(k) => k.clone(),
+                    None => {
+                        // We don't know their key yet but they sent HELLO.
+                        // They should have sent PUBKEY first - ask them.
+                        self.push_msg(
                                 format!(
                                     "[error] Got HELLO from {} but no public key stored. They should re-run SECURE.",
                                     sender
                                 ),
                                 Color::Red,
                             );
-                            return;
-                        }
-                    };
-                    let new_hs = Handshake::new();
-                    // Send our public key first so they can TOFU-store us
-                    if let Some(id) = &self.identity {
-                        let my_pubkey = id.public_key_b64();
-                        self.send_raw(&format!("MSG {} PUBKEY {}", sender, my_pubkey));
-                        // Now send our HELLO
-                        let hello = new_hs.hello_line(id);
-                        let hello_parts: Vec<&str> = hello.splitn(4, ' ').collect();
-                        if hello_parts.len() == 4 {
-                            self.send_raw(&format!(
-                                "MSG {} HELLO {} {}",
-                                sender, hello_parts[2], hello_parts[3]
-                            ));
-                        }
+                        return;
                     }
-                    (new_hs, peer_pub, false)
+                };
+                let new_hs = Handshake::new();
+                // Send our public key first so they can TOFU-store us
+                if let Some(id) = &self.identity {
+                    let my_pubkey = id.public_key_b64();
+                    self.send_raw(&format!("MSG {} PUBKEY {}", sender, my_pubkey));
+                    // Now send our HELLO
+                    let hello = new_hs.hello_line(id);
+                    let hello_parts: Vec<&str> = hello.splitn(4, ' ').collect();
+                    if hello_parts.len() == 4 {
+                        self.send_raw(&format!(
+                            "MSG {} HELLO {} {}",
+                            sender, hello_parts[2], hello_parts[3]
+                        ));
+                    }
                 }
-            };
+                (new_hs, peer_pub, false)
+            }
+        };
 
         // Derive session keys
         match my_handshake.derive_session(
@@ -646,7 +674,7 @@ enum InputMode {
     ConfirmDeleteAll,
     DeleteTask,
     SelectDay,
-    ChatTyping,       // user is composing a chat message / command
+    ChatTyping, // user is composing a chat message / command
 }
 
 enum View {
@@ -1716,10 +1744,10 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // title + session status
-                Constraint::Min(5),     // message log
-                Constraint::Length(3),  // input bar
-                Constraint::Length(3),  // controls hint
+                Constraint::Length(3), // title + session status
+                Constraint::Min(5),    // message log
+                Constraint::Length(3), // input bar
+                Constraint::Length(3), // controls hint
             ])
             .split(area);
 
@@ -1732,8 +1760,9 @@ impl App {
         let session_label = match self.chat.active_peer() {
             Some(peer) => format!("chatting with: {}", peer),
             None => match &self.chat.session {
-                SecureSessionState::AwaitingHello { peer_username, .. } =>
-                    format!("handshake with {} in progress...", peer_username),
+                SecureSessionState::AwaitingHello { peer_username, .. } => {
+                    format!("handshake with {} in progress...", peer_username)
+                }
                 _ => "type: REGISTER <name> then SECURE <peer>".to_string(),
             },
         };
@@ -1757,11 +1786,16 @@ impl App {
 
         // Count how many rendered rows each message takes (word-wrap simulation)
         let msgs = &self.chat.messages;
-        let row_counts: Vec<usize> = msgs.iter().map(|(text, _)| {
-            if inner_width == 0 { 1 } else {
-                text.len().saturating_sub(1) / inner_width + 1
-            }
-        }).collect();
+        let row_counts: Vec<usize> = msgs
+            .iter()
+            .map(|(text, _)| {
+                if inner_width == 0 {
+                    1
+                } else {
+                    text.len().saturating_sub(1) / inner_width + 1
+                }
+            })
+            .collect();
 
         // Walk from the end, accumulating rows until we fill visible_height
         let total_rows: usize = row_counts.iter().sum();
@@ -1785,29 +1819,25 @@ impl App {
             .collect();
 
         let log = Paragraph::new(log_lines)
-            .block(Block::bordered().title(" Messages ").border_style(
-                Style::default().fg(Color::White),
-            ))
+            .block(
+                Block::bordered()
+                    .title(" Messages ")
+                    .border_style(Style::default().fg(Color::White)),
+            )
             .wrap(Wrap { trim: false });
         log.render(chunks[1], buf);
 
         // Input bar
         let input_content = match &self.mode {
-            InputMode::ChatTyping => {
-                Line::from(vec![
-                    Span::styled("> ", Style::default().fg(Color::Blue).bold()),
-                    Span::styled(&self.chat.input, Style::default().fg(Color::White)),
-                    Span::styled("_", Style::default().fg(Color::Blue)),
-                ])
-            }
-            _ => {
-                Line::from(vec![
-                    Span::styled(
-                        "Press I to type a command",
-                        Style::default().fg(Color::DarkGray).italic(),
-                    ),
-                ])
-            }
+            InputMode::ChatTyping => Line::from(vec![
+                Span::styled("> ", Style::default().fg(Color::Blue).bold()),
+                Span::styled(&self.chat.input, Style::default().fg(Color::White)),
+                Span::styled("_", Style::default().fg(Color::Blue)),
+            ]),
+            _ => Line::from(vec![Span::styled(
+                "Press I to type a command",
+                Style::default().fg(Color::DarkGray).italic(),
+            )]),
         };
         let input_block = Paragraph::new(input_content)
             .block(Block::bordered().border_style(Style::default().fg(Color::Blue)));
@@ -1816,7 +1846,10 @@ impl App {
         // Controls
         let hint = if matches!(self.mode, InputMode::ChatTyping) {
             let cmd_hint = if let Some(peer) = self.chat.active_peer() {
-                format!("  Just type to send to {}  |  Commands: SECURE <peer>  LIST  QUIT", peer)
+                format!(
+                    "  Just type to send to {}  |  Commands: SECURE <peer>  LIST  QUIT",
+                    peer
+                )
             } else {
                 "  Commands: REGISTER <name>  SECURE <peer>  LIST  QUIT".to_string()
             };
@@ -1877,7 +1910,9 @@ impl App {
         // ── Quick-send shortcut ───────────────────────────────────────────────
         // If the user types text that isn't a known command AND there's an active
         // secure session, treat the whole input as the message body to the peer.
-        let known_commands = ["CONNECT","COMMANDS", "REGISTER", "PUBKEY", "SECURE", "LIST", "MSG", "QUIT"];
+        let known_commands = [
+            "CONNECT", "COMMANDS", "REGISTER", "PUBKEY", "SECURE", "LIST", "MSG", "QUIT",
+        ];
         if !known_commands.contains(&cmd.as_str()) {
             let peer_opt = self.chat.active_peer().map(|s| s.to_string());
             if let Some(peer) = peer_opt {
@@ -1887,13 +1922,12 @@ impl App {
                         Ok(wire) => {
                             self.chat.send_raw(&format!("MSG {} ENC {}", peer, wire));
                             let me = self.chat.my_username();
-                            self.chat.push_msg(
-                                format!("{}: {}", me, plaintext),
-                                Color::Cyan,
-                            );
+                            self.chat
+                                .push_msg(format!("{}: {}", me, plaintext), Color::Cyan);
                         }
                         Err(e) => {
-                            self.chat.push_msg(format!("[encrypt error] {}", e), Color::Red);
+                            self.chat
+                                .push_msg(format!("[encrypt error] {}", e), Color::Red);
                         }
                     }
                 }
@@ -1910,7 +1944,9 @@ impl App {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(RELAY_PORT);
                 match self.chat.connect(host, port) {
-                    Ok(_) => self.chat.push_msg("[system] Connected to relay server.", Color::Yellow),
+                    Ok(_) => self
+                        .chat
+                        .push_msg("[system] Connected to relay server.", Color::Yellow),
                     Err(e) => self.chat.push_msg(format!("[system] {}", e), Color::Red),
                 }
             }
@@ -1922,7 +1958,8 @@ impl App {
                 let username = match parts.get(1).copied() {
                     Some(u) => u.to_string(),
                     None => {
-                        self.chat.push_msg("[error] Usage: REGISTER <username>", Color::Red);
+                        self.chat
+                            .push_msg("[error] Usage: REGISTER <username>", Color::Red);
                         return;
                     }
                 };
@@ -1932,13 +1969,17 @@ impl App {
                     Ok(identity) => {
                         let pubkey = identity.public_key_b64();
                         self.chat.push_msg(
-                            format!("Identity key loaded. Fingerprint: {}...", &pubkey[..pubkey.len().min(16)]),
+                            format!(
+                                "Identity key loaded. Fingerprint: {}...",
+                                &pubkey[..pubkey.len().min(16)]
+                            ),
                             Color::Yellow,
                         );
                         self.chat.identity = Some(identity);
                     }
                     Err(e) => {
-                        self.chat.push_msg(format!("[error] Key load failed: {}", e), Color::Red);
+                        self.chat
+                            .push_msg(format!("[error] Key load failed: {}", e), Color::Red);
                         return;
                     }
                 }
@@ -1964,35 +2005,38 @@ impl App {
                         Color::DarkGray,
                     );
                     self.chat.push_msg(
-                        format!("[system] Your key fingerprint: {}...", &pubkey[..pubkey.len().min(24)]),
+                        format!(
+                            "[system] Your key fingerprint: {}...",
+                            &pubkey[..pubkey.len().min(24)]
+                        ),
                         Color::DarkGray,
                     );
                 }
             }
-            // - COMMANDS - showcase available commands to screen - 
-            "COMMANDS" => {
-                self.chat.send_raw("COMMANDS");
-                self.chat.send_raw("Known Commands: {}");
-            }
+            // - COMMANDS - showcase available commands to screen -
+            "COMMANDS" => todo!(),
 
             // ── PUBKEY - broadcast our public key to a specific peer ──────────
             "PUBKEY" => {
                 let target = match parts.get(1).copied() {
                     Some(t) => t,
                     None => {
-                        self.chat.push_msg("[error] Usage: PUBKEY <username>", Color::Red);
+                        self.chat
+                            .push_msg("[error] Usage: PUBKEY <username>", Color::Red);
                         return;
                     }
                 };
                 if let Some(id) = &self.chat.identity {
                     let pubkey = id.public_key_b64();
-                    self.chat.send_raw(&format!("MSG {} PUBKEY {}", target, pubkey));
+                    self.chat
+                        .send_raw(&format!("MSG {} PUBKEY {}", target, pubkey));
                     self.chat.push_msg(
                         format!("[system] Public key sent to {}.", target),
                         Color::DarkGray,
                     );
                 } else {
-                    self.chat.push_msg("[error] Not registered yet.", Color::Red);
+                    self.chat
+                        .push_msg("[error] Not registered yet.", Color::Red);
                 }
             }
 
@@ -2006,7 +2050,8 @@ impl App {
                 let peer = match parts.get(1).copied() {
                     Some(p) => p.to_string(),
                     None => {
-                        self.chat.push_msg("[error] Usage: SECURE <username>", Color::Red);
+                        self.chat
+                            .push_msg("[error] Usage: SECURE <username>", Color::Red);
                         return;
                     }
                 };
@@ -2018,7 +2063,8 @@ impl App {
 
                 // Step 1: Send our public key to peer so they can TOFU-store it
                 let pubkey = self.chat.identity.as_ref().unwrap().public_key_b64();
-                self.chat.send_raw(&format!("MSG {} PUBKEY {}", peer, pubkey));
+                self.chat
+                    .send_raw(&format!("MSG {} PUBKEY {}", peer, pubkey));
 
                 // Step 2: Generate ephemeral X25519 keypair and send HELLO
                 let identity = self.chat.identity.as_ref().unwrap();
@@ -2039,7 +2085,10 @@ impl App {
 
                 if peer_pubkey_b64.is_empty() {
                     self.chat.push_msg(
-                        format!("[handshake] Sent PUBKEY + HELLO to {}. Waiting for their PUBKEY...", peer),
+                        format!(
+                            "[handshake] Sent PUBKEY + HELLO to {}. Waiting for their PUBKEY...",
+                            peer
+                        ),
                         Color::Yellow,
                     );
                 } else {
@@ -2059,13 +2108,13 @@ impl App {
             // ── LIST ──────────────────────────────────────────────────────────
             "LIST" => {
                 self.chat.send_raw("LIST");
-                self.chat.push_msg("[you] LIST", Color::DarkGray);
             }
 
             // ── MSG - send encrypted message (requires SECURE session) ────────
             "MSG" => {
                 if parts.len() < 3 {
-                    self.chat.push_msg("[error] Usage: MSG <recipient> <message>", Color::Red);
+                    self.chat
+                        .push_msg("[error] Usage: MSG <recipient> <message>", Color::Red);
                     return;
                 }
                 let recipient = parts[1].to_string();
@@ -2077,7 +2126,8 @@ impl App {
                     {
                         match keys.encrypt(plaintext) {
                             Ok(wire) => {
-                                self.chat.send_raw(&format!("MSG {} ENC {}", recipient, wire));
+                                self.chat
+                                    .send_raw(&format!("MSG {} ENC {}", recipient, wire));
                                 let me = self.chat.my_username();
                                 self.chat.push_msg(
                                     format!("{} → {}: {}", me, recipient, plaintext),
@@ -2085,7 +2135,8 @@ impl App {
                                 );
                             }
                             Err(e) => {
-                                self.chat.push_msg(format!("[encrypt error] {}", e), Color::Red);
+                                self.chat
+                                    .push_msg(format!("[encrypt error] {}", e), Color::Red);
                             }
                         }
                     }
@@ -2112,7 +2163,8 @@ impl App {
             }
 
             _ => {
-                self.chat.push_msg(format!("[error] Unknown command: {}", raw), Color::Red);
+                self.chat
+                    .push_msg(format!("[error] Unknown command: {}", raw), Color::Red);
                 self.chat.push_msg(
                     "[help] REGISTER <name>  SECURE <peer>  MSG <peer> <text>  LIST  QUIT",
                     Color::DarkGray,
