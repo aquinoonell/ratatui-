@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use chrono::{DateTime, Datelike, Duration, Local};
+use chrono::{DateTime, Datelike, Duration, Local, format};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -1877,7 +1877,7 @@ impl App {
         // ── Quick-send shortcut ───────────────────────────────────────────────
         // If the user types text that isn't a known command AND there's an active
         // secure session, treat the whole input as the message body to the peer.
-        let known_commands = ["CONNECT", "REGISTER", "PUBKEY", "SECURE", "LIST", "MSG", "QUIT"];
+        let known_commands = ["CONNECT","COMMANDS", "REGISTER", "PUBKEY", "SECURE", "LIST", "MSG", "QUIT"];
         if !known_commands.contains(&cmd.as_str()) {
             let peer_opt = self.chat.active_peer().map(|s| s.to_string());
             if let Some(peer) = peer_opt {
@@ -1968,6 +1968,11 @@ impl App {
                         Color::DarkGray,
                     );
                 }
+            }
+            // - COMMANDS - showcase available commands to screen - 
+            "COMMANDS" => {
+                self.chat.send_raw("COMMANDS");
+                self.chat.send_raw("Known Commands: {}");
             }
 
             // ── PUBKEY - broadcast our public key to a specific peer ──────────

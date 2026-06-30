@@ -3,9 +3,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng as AeadOsRng},
     ChaCha20Poly1305, Nonce,
 };
-use ed25519_dalek::{
-    ed25519::signature::Signer, Signature, SigningKey, Verifier, VerifyingKey,
-};
+use ed25519_dalek::{ed25519::signature::Signer, Signature, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -24,7 +22,7 @@ const HKDF_INFO_MSGKEY: &[u8] = b"timetracker-v1-msgkey";
 // ─── Disk storage types ───────────────────────────────────────────────────────
 
 /// Serialisable form of an identity keypair saved to disk.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 struct StoredIdentity {
     username: String,
     /// Ed25519 signing key bytes (32 bytes, little-endian scalar)
@@ -71,30 +69,37 @@ impl Identity {
         };
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Cannot create key dir: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Cannot create key dir: {}", e))?;
         }
-        let json = serde_json::to_string_pretty(&stored)
-            .map_err(|e| format!("Serialise error: {}", e))?;
+        let json =
+            serde_json::to_string_pretty(&stored).map_err(|e| format!("Serialise error: {}", e))?;
         fs::write(path, json).map_err(|e| format!("Cannot write key file: {}", e))?;
 
-        Ok(Identity { username: username.to_string(), signing_key, verifying_key })
+        Ok(Identity {
+            username: username.to_string(),
+            signing_key,
+            verifying_key,
+        })
     }
 
     fn load(username: &str, path: &PathBuf) -> Result<Self, String> {
-        let json = fs::read_to_string(path)
-            .map_err(|e| format!("Cannot read key file: {}", e))?;
-        let stored: StoredIdentity = serde_json::from_str(&json)
-            .map_err(|e| format!("Key file corrupt: {}", e))?;
+        let json = fs::read_to_string(path).map_err(|e| format!("Cannot read key file: {}", e))?;
+        let stored: StoredIdentity =
+            serde_json::from_str(&json).map_err(|e| format!("Key file corrupt: {}", e))?;
 
-        let sk_bytes: [u8; 32] = B64.decode(&stored.signing_key_b64)
+        let sk_bytes: [u8; 32] = B64
+            .decode(&stored.signing_key_b64)
             .map_err(|_| "Bad signing key encoding".to_string())?
             .try_into()
             .map_err(|_| "Signing key wrong length".to_string())?;
         let signing_key = SigningKey::from_bytes(&sk_bytes);
         let verifying_key = signing_key.verifying_key();
 
-        Ok(Identity { username: username.to_string(), signing_key, verifying_key })
+        Ok(Identity {
+            username: username.to_string(),
+            signing_key,
+            verifying_key,
+        })
     }
 
     /// Return the public key as a base64 string for wire transmission.
@@ -139,15 +144,12 @@ impl KnownUsers {
     /// Check a peer's claimed public key against our TOFU store.
     /// Returns Ok(true) = new (first seen), Ok(false) = known and matching,
     /// Err(msg) = key CHANGED — possible MITM.
-    pub fn check_and_update(
-        &mut self,
-        username: &str,
-        pubkey_b64: &str,
-    ) -> Result<bool, String> {
+    pub fn check_and_update(&mut self, username: &str, pubkey_b64: &str) -> Result<bool, String> {
         match self.users.get(username) {
             None => {
                 // First time seeing this user — trust and store
-                self.users.insert(username.to_string(), pubkey_b64.to_string());
+                self.users
+                    .insert(username.to_string(), pubkey_b64.to_string());
                 self.save();
                 Ok(true)
             }
@@ -178,7 +180,10 @@ impl Handshake {
     pub fn new() -> Self {
         let secret = EphemeralSecret::random_from_rng(OsRng);
         let public = X25519Public::from(&secret);
-        Handshake { ephemeral_secret: Some(secret), ephemeral_public: public }
+        Handshake {
+            ephemeral_secret: Some(secret),
+            ephemeral_public: public,
+        }
     }
 
     /// Build the HELLO wire payload:
@@ -199,14 +204,15 @@ impl Handshake {
     /// their send key = the other side's recv key.
     pub fn derive_session(
         mut self,
-        peer_username: &str,      // peer's username — stored in SessionKeys for session lookup
-        peer_pubkey_b64: &str,    // peer's Ed25519 verifying key (base64)
-        peer_eph_pub_b64: &str,   // peer's X25519 ephemeral public (base64)
-        peer_sig_b64: &str,       // peer's signature over "HELLO" || peer_eph_pub
+        peer_username: &str, // peer's username — stored in SessionKeys for session lookup
+        peer_pubkey_b64: &str, // peer's Ed25519 verifying key (base64)
+        peer_eph_pub_b64: &str, // peer's X25519 ephemeral public (base64)
+        peer_sig_b64: &str,  // peer's signature over "HELLO" || peer_eph_pub
         i_am_initiator: bool,
     ) -> Result<SessionKeys, String> {
         // 1. Decode peer's identity key
-        let peer_vk_bytes: [u8; 32] = B64.decode(peer_pubkey_b64)
+        let peer_vk_bytes: [u8; 32] = B64
+            .decode(peer_pubkey_b64)
             .map_err(|_| "Bad peer pubkey encoding".to_string())?
             .try_into()
             .map_err(|_| "Peer pubkey wrong length".to_string())?;
@@ -214,7 +220,8 @@ impl Handshake {
             .map_err(|_| "Invalid peer verifying key".to_string())?;
 
         // 2. Decode peer's ephemeral key
-        let peer_eph_bytes: [u8; 32] = B64.decode(peer_eph_pub_b64)
+        let peer_eph_bytes: [u8; 32] = B64
+            .decode(peer_eph_pub_b64)
             .map_err(|_| "Bad peer eph pub encoding".to_string())?
             .try_into()
             .map_err(|_| "Peer eph pub wrong length".to_string())?;
@@ -223,16 +230,20 @@ impl Handshake {
         // 3. Verify peer's signature over "HELLO" || peer_eph_pub
         let mut signed_msg = b"HELLO".to_vec();
         signed_msg.extend_from_slice(&peer_eph_bytes);
-        let sig_bytes: [u8; 64] = B64.decode(peer_sig_b64)
+        let sig_bytes: [u8; 64] = B64
+            .decode(peer_sig_b64)
             .map_err(|_| "Bad signature encoding".to_string())?
             .try_into()
             .map_err(|_| "Signature wrong length".to_string())?;
         let sig = Signature::from_bytes(&sig_bytes);
-        peer_vk.verify(&signed_msg, &sig)
+        peer_vk
+            .verify(&signed_msg, &sig)
             .map_err(|_| "Signature verification FAILED — handshake rejected".to_string())?;
 
         // 4. X25519 DH — consume and zero the ephemeral secret
-        let my_secret = self.ephemeral_secret.take()
+        let my_secret = self
+            .ephemeral_secret
+            .take()
             .ok_or("Handshake already consumed")?;
         let shared_secret = my_secret.diffie_hellman(&peer_eph_pub);
 
@@ -250,7 +261,11 @@ impl Handshake {
             (key_b.to_vec(), key_a.to_vec())
         };
 
-        Ok(SessionKeys::new(peer_username.to_string(), send_chain, recv_chain))
+        Ok(SessionKeys::new(
+            peer_username.to_string(),
+            send_chain,
+            recv_chain,
+        ))
     }
 }
 
@@ -265,7 +280,11 @@ pub struct SessionKeys {
 
 impl SessionKeys {
     fn new(peer_username: String, send_chain: Vec<u8>, recv_chain: Vec<u8>) -> Self {
-        SessionKeys { peer_username, send_chain_key: send_chain, recv_chain_key: recv_chain }
+        SessionKeys {
+            peer_username,
+            send_chain_key: send_chain,
+            recv_chain_key: recv_chain,
+        }
     }
 
     /// Ratchet the send chain forward: derive a one-time message key, advance
@@ -293,7 +312,8 @@ impl SessionKeys {
 
     /// Ratchet the recv chain forward and decrypt a wire payload.
     pub fn decrypt(&mut self, wire_b64: &str) -> Result<String, String> {
-        let wire = B64.decode(wire_b64)
+        let wire = B64
+            .decode(wire_b64)
             .map_err(|_| "Bad base64 in ciphertext".to_string())?;
         if wire.len() < 12 {
             return Err("Ciphertext too short".to_string());
@@ -312,8 +332,7 @@ impl SessionKeys {
 
         drop(msg_key);
 
-        String::from_utf8(plaintext)
-            .map_err(|_| "Decrypted bytes are not valid UTF-8".to_string())
+        String::from_utf8(plaintext).map_err(|_| "Decrypted bytes are not valid UTF-8".to_string())
     }
 }
 
@@ -338,12 +357,12 @@ fn ratchet_step(chain_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
 
 /// Parse an Ed25519 verifying key from base64.
 pub fn parse_verifying_key(b64: &str) -> Result<VerifyingKey, String> {
-    let bytes: [u8; 32] = B64.decode(b64)
+    let bytes: [u8; 32] = B64
+        .decode(b64)
         .map_err(|_| "Bad base64 for verifying key".to_string())?
         .try_into()
         .map_err(|_| "Verifying key wrong length".to_string())?;
-    VerifyingKey::from_bytes(&bytes)
-        .map_err(|_| "Invalid Ed25519 verifying key".to_string())
+    VerifyingKey::from_bytes(&bytes).map_err(|_| "Invalid Ed25519 verifying key".to_string())
 }
 
 fn config_dir() -> PathBuf {
